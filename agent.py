@@ -3,22 +3,19 @@ from pathlib import Path
 from smolagents import (
     CodeAgent,
     DuckDuckGoSearchTool,
-    OpenAIModel,
     PythonInterpreterTool,
     VisitWebpageTool,
     WikipediaSearchTool,
 )
 
 from config import (
-    COHERE_API_KEY,
-    COHERE_BASE_URL,
-    COHERE_MODEL,
     MAX_AGENT_STEPS,
     MAX_WEBPAGE_TEXT,
     PLANNING_INTERVAL,
     WEB_MAX_RESULTS,
     WEB_RATE_LIMIT,
 )
+from models import FailoverModel
 from tools import (
     AnalyzeImageTool,
     ExtractYouTubeIdTool,
@@ -29,24 +26,13 @@ from tools import (
 )
 
 ROOT = Path(__file__).resolve().parent
-SYSTEM_PROMPT = (ROOT / "prompts" / "gaia_system.txt").read_text(encoding="utf-8")
+SYSTEM_PROMPT = (ROOT / "prompts" / "gaia_system.txt").read_text(
+    encoding="utf-8"
+)
 
 
 def create_model():
-    if not COHERE_API_KEY:
-        raise RuntimeError(
-            "COHERE_API_KEY is required. Copy .env.example to .env and configure it."
-        )
-
-    return OpenAIModel(
-        model_id=COHERE_MODEL,
-        api_base=COHERE_BASE_URL,
-        api_key=COHERE_API_KEY,
-        client_kwargs={"max_retries": 5, "timeout": 120},
-        temperature=0,
-        reasoning_effort="high",
-        max_tokens=4096,
-    )
+    return FailoverModel()
 
 
 def create_agent():
@@ -92,7 +78,6 @@ def create_agent():
         planning_interval=PLANNING_INTERVAL,
         instructions=SYSTEM_PROMPT,
         return_full_result=True,
-        use_structured_outputs_internally=True,
     )
 
 
@@ -101,7 +86,12 @@ def clean_answer(value) -> str:
     if not text:
         return text
 
-    for marker in ("FINAL ANSWER:", "FINAL ANSWER", "Final answer:", "Final Answer:"):
+    for marker in (
+        "FINAL ANSWER:",
+        "FINAL ANSWER",
+        "Final answer:",
+        "Final Answer:",
+    ):
         if text.startswith(marker):
             text = text[len(marker):].strip()
             break
@@ -124,5 +114,5 @@ def solve(question: str, attachment_path: str | None = None, debug: bool = False
     answer = clean_answer(result.output if hasattr(result, "output") else result)
 
     if debug:
-        return answer, result
+        return answer, result, agent.model
     return answer
