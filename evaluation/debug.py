@@ -41,7 +41,7 @@ def main():
         print(f"attachment: {attachment_path}")
 
     started = time.perf_counter()
-    answer, result = solve(
+    answer, result, model = solve(
         question,
         attachment_path=attachment_path,
         debug=True,
@@ -65,6 +65,8 @@ def main():
         print(f"steps: {len(result.steps)}")
     if hasattr(result, "token_usage") and result.token_usage:
         print(f"token_usage: {result.token_usage}")
+    if hasattr(model, "status"):
+        print(f"model_routes: {json.dumps(model.status())}")
 
     report = {
         "task_id": task_id,
@@ -77,6 +79,7 @@ def main():
         "elapsed_seconds": round(elapsed, 3),
         "steps": len(result.steps) if hasattr(result, "steps") else None,
         "token_usage": str(getattr(result, "token_usage", None)),
+        "model_status": model.status() if hasattr(model, "status") else None,
     }
 
     report_dir = Path(".gaia_debug_runs")
