@@ -20,6 +20,7 @@ from tools import (
     AnalyzeImageTool,
     ExtractYouTubeIdTool,
     InspectFileTool,
+    WikipediaPageAsOfTool,
     ReadFileTool,
     TranscribeAudioTool,
     YouTubeTranscriptTool,
@@ -41,6 +42,7 @@ def create_agent():
             max_results=WEB_MAX_RESULTS,
             rate_limit=WEB_RATE_LIMIT,
         ),
+        WikipediaPageAsOfTool(),
         WikipediaSearchTool(
             user_agent="gaia-agent/1.0",
             language="en",
