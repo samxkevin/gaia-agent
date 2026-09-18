@@ -40,8 +40,8 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 HF_USERNAME = os.getenv("HF_USERNAME", "")
 AGENT_CODE_URL = os.getenv("AGENT_CODE_URL", "")
 
-MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "18"))
-PLANNING_INTERVAL = int(os.getenv("PLANNING_INTERVAL", "5"))
+MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "10"))
+PLANNING_INTERVAL = int(os.getenv("PLANNING_INTERVAL", "0"))
 WEB_MAX_RESULTS = int(os.getenv("WEB_MAX_RESULTS", "8"))
 WEB_RATE_LIMIT = float(os.getenv("WEB_RATE_LIMIT", "1.0"))
 
