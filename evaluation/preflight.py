@@ -62,11 +62,37 @@ def main():
     print(f"Configured chat routes: {len(routes)}")
     print(f"Fallback model: {COHERE_FALLBACK_MODEL}")
 
+    route_errors = []
     if not missing:
         from openai import OpenAI
 
         print("Probing all configured model/key routes...")
         for route in routes:
+            try:
+                client = OpenAI(
+                    api_key=route.api_key,
+                    base_url=COHERE_BASE_URL,
+                    timeout=MODEL_TIMEOUT_SECONDS,
+                    max_retries=0,
+                )
+                response = client.chat.completions.create(
+                    model=route.model_id,
+                    messages=[{"role": "user", "content": "Reply with OK."}],
+                    max_tokens=4,
+                    reasoning_effort="none",
+                )
+                if not response.choices:
+                    raise RuntimeError("No completion choices returned.")
+                print(f"  OK: {route.key_slot} -> {route.model_id}")
+            except Exception as exc:
+                message = (
+                    f"{route.key_slot} -> {route.model_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                route_errors.append(message)
+                print(f"  FAIL: {message}")
+
+    for route in routes:
             try:
                 client = OpenAI(
                     api_key=route.api_key,
@@ -92,10 +118,9 @@ def main():
     for route in routes:
         print(f"  {route.key_slot} -> {route.model_id}")
 
-    if missing:
-        raise RuntimeError(
-            "Preflight failed: " + ", ".join(missing)
-        )
+    if missing or route_errors:
+        problems = missing + [f"route probe failed: {error}" for error in route_errors]
+        raise RuntimeError("Preflight failed: " + " | ".join(problems))
 
     print("Preflight: PASS")
 
