@@ -78,6 +78,7 @@ def create_agent():
         planning_interval=PLANNING_INTERVAL,
         instructions=SYSTEM_PROMPT,
         return_full_result=True,
+        max_tool_threads=3,
     )
 
 
