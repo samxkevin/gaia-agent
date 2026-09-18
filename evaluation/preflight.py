@@ -11,7 +11,15 @@ def main():
     if not (os.getenv("COHERE_PRIMARY_API_KEY") or os.getenv("COHERE_API_KEY")):
         missing.append("COHERE_PRIMARY_API_KEY")
 
-    for module in ("smolagents", "openai", "cohere", "requests", "ddgs", "wikipediaapi"):
+    for module in (
+        "smolagents",
+        "openai",
+        "cohere",
+        "requests",
+        "ddgs",
+        "wikipediaapi",
+        "markdownify",
+    ):
         if importlib.util.find_spec(module) is None:
             missing.append(f"python package: {module}")
 
@@ -24,11 +32,13 @@ def main():
     missing_fields = sorted(required.difference(first))
 
     if missing_fields:
-        raise RuntimeError(f"GAIA schema is missing fields: {missing_fields}")
+        raise RuntimeError(
+            f"GAIA schema is missing fields: {missing_fields}"
+        )
 
     routes = get_chat_routes()
 
-    from smolagents import DuckDuckGoSearchTool, WikipediaSearchTool
+    from smolagents import DuckDuckGoSearchTool, VisitWebpageTool, WikipediaSearchTool
 
     DuckDuckGoSearchTool(max_results=1, rate_limit=1.0)
     WikipediaSearchTool(
@@ -37,6 +47,7 @@ def main():
         content_type="text",
         extract_format="WIKI",
     )
+    VisitWebpageTool(max_output_length=1000)
     print("Tool dependencies: OK")
 
     print(f"GAIA questions available: {len(questions)}")
@@ -49,7 +60,9 @@ def main():
         print(f"  {route.key_slot} -> {route.model_id}")
 
     if missing:
-        raise RuntimeError("Preflight failed: " + ", ".join(missing))
+        raise RuntimeError(
+            "Preflight failed: " + ", ".join(missing)
+        )
 
     print("Preflight: PASS")
 
