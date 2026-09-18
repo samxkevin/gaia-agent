@@ -9,7 +9,7 @@ GAIA_API_URL = os.getenv(
     "https://agents-course-unit4-scoring.hf.space",
 )
 
-COHERE_PRIMARY_API_KEY = os.getenv("COHERE_PRIMARY_API_KEY", "")
+COHERE_PRIMARY_API_KEY = os.getenv("COHERE_PRIMARY_API_KEY", "") or os.getenv("COHERE_API_KEY", "")
 COHERE_FALLBACK_API_KEY = os.getenv("COHERE_FALLBACK_API_KEY", "")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY", "") or COHERE_PRIMARY_API_KEY
 
