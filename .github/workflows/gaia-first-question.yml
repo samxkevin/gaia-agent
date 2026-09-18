@@ -65,6 +65,12 @@ jobs:
           COHERE_API_KEY: smoke
         run: python -c "import agent; import evaluation.client; import evaluation.debug; print('imports: OK')"
 
+      - name: Compile Python
+        run: python -m compileall -q .
+
+      - name: Import project
+        run: python -c "import agent; import evaluation.client; import evaluation.debug; print('imports: OK')"
+
       - name: Check Cohere key
         run: |
           if [ -z "$COHERE_PRIMARY_API_KEY" ]; then
