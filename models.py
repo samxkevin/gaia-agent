@@ -112,7 +112,7 @@ class FailoverModel(Model):
             },
             retry=False,
             temperature=0,
-            reasoning_effort="high",
+            reasoning_effort=self._reasoning_effort(route.model_id),
             max_tokens=4096,
         )
 
@@ -197,6 +197,13 @@ class FailoverModel(Model):
         raise RuntimeError(
             "All Cohere model routes failed. " + " | ".join(errors)
         )
+
+    @staticmethod
+    def _reasoning_effort(model_id: str) -> str:
+        model_name = model_id.lower()
+        if "reasoning" in model_name or "plus" in model_name:
+            return "high"
+        return "none"
 
     @staticmethod
     def _is_transient(exc: Exception) -> bool:
