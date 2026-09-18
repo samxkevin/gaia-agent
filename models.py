@@ -5,7 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from smolagents import Model, OpenAIModel
+from smolagents import Model, OpenAIModel, REMOVE_PARAMETER
 
 from config import (
     COHERE_BASE_URL,
@@ -114,7 +114,7 @@ class FailoverModel(Model):
             temperature=0,
             reasoning_effort=self._reasoning_effort(route.model_id),
             max_tokens=4096,
-            tool_choice=None,
+            tool_choice=REMOVE_PARAMETER,
         )
 
     def _ordered_routes(self) -> list[Route]:
