@@ -19,7 +19,7 @@ COHERE_PRIMARY_MODEL = os.getenv(
 )
 COHERE_FALLBACK_MODEL = os.getenv(
     "COHERE_FALLBACK_MODEL",
-    "command-a-03-2025",
+    "command-a-reasoning-08-2025",
 )
 
 COHERE_BASE_URL = os.getenv(
