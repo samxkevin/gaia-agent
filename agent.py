@@ -77,7 +77,7 @@ def create_agent():
         model=create_model(),
         max_steps=MAX_AGENT_STEPS,
         verbosity_level=2,
-        planning_interval=None if PLANNING_INTERVAL <= 0 else PLANNING_INTERVAL,
+        planning_interval=None,
         max_steps=min(MAX_AGENT_STEPS, 10),
         instructions=SYSTEM_PROMPT,
         return_full_result=True,
