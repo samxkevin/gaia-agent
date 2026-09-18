@@ -8,7 +8,7 @@ GAIA question
     |
 Question parser
     |
-CodeAgent with Command A+
+ToolCallingAgent with Command A+
     |-- DuckDuckGo web search
     |-- Wikipedia retrieval
     |-- webpage retrieval
