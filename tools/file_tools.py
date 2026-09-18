@@ -2,17 +2,19 @@ from pathlib import Path
 
 from smolagents import Tool
 
+from config import MAX_TOOL_TEXT
+
 
 class ReadFileTool(Tool):
     name = "read_local_file"
     description = (
-        "Read a local GAIA attachment. Supports UTF-8 text, JSON, CSV, XML, "
-        "HTML, Markdown and PDF files. Returns extracted text."
+        "Read a local GAIA attachment. Supports UTF 8 text, JSON, CSV, XML, "
+        "HTML, Markdown, Python, YAML, PDF, DOCX, and XLSX files."
     )
     inputs = {
         "path": {
             "type": "string",
-            "description": "Absolute or repository-local path to the file.",
+            "description": "Absolute or repository local path to the file.",
         },
     }
     output_type = "string"
@@ -25,49 +27,68 @@ class ReadFileTool(Tool):
 
         suffix = file_path.suffix.lower()
 
-        if suffix == ".pdf":
-            try:
+        try:
+            if suffix == ".pdf":
                 from pypdf import PdfReader
 
                 reader = PdfReader(str(file_path))
-                pages = [
-                    page.extract_text() or ""
-                    for page in reader.pages
-                ]
-                return "\n\n".join(pages)[:100000]
-            except Exception as exc:
-                return f"Could not read PDF: {exc}"
+                pages = [page.extract_text() or "" for page in reader.pages]
+                return "\n\n".join(pages)[:MAX_TOOL_TEXT]
 
-        text_suffixes = {
-            ".txt", ".md", ".csv", ".json", ".xml", ".html",
-            ".htm", ".py", ".js", ".ts", ".yaml", ".yml",
-        }
+            if suffix == ".docx":
+                from docx import Document
 
-        if suffix in text_suffixes:
-            try:
+                document = Document(str(file_path))
+                parts = [paragraph.text for paragraph in document.paragraphs]
+                for table in document.tables:
+                    for row in table.rows:
+                        parts.append(" | ".join(cell.text for cell in row.cells))
+                return "\n".join(parts)[:MAX_TOOL_TEXT]
+
+            if suffix == ".xlsx":
+                from openpyxl import load_workbook
+
+                workbook = load_workbook(
+                    str(file_path),
+                    read_only=True,
+                    data_only=True,
+                )
+                parts = []
+                for sheet in workbook.worksheets:
+                    parts.append(f"[Sheet: {sheet.title}]")
+                    for row in sheet.iter_rows(values_only=True):
+                        values = ["" if value is None else str(value) for value in row]
+                        parts.append(" | ".join(values))
+                workbook.close()
+                return "\n".join(parts)[:MAX_TOOL_TEXT]
+
+            text_suffixes = {
+                ".txt", ".md", ".csv", ".json", ".xml", ".html",
+                ".htm", ".py", ".js", ".ts", ".yaml", ".yml",
+            }
+
+            if suffix in text_suffixes:
                 return file_path.read_text(
                     encoding="utf-8",
                     errors="replace",
-                )[:100000]
-            except Exception as exc:
-                return f"Could not read text file: {exc}"
+                )[:MAX_TOOL_TEXT]
 
-        return (
-            f"Unsupported text format: {suffix}. "
-            "Use Python for binary analysis or inspect the file metadata first."
-        )
+        except Exception as exc:
+            return f"Could not read {file_path.name}: {exc}"
+
+        return f"Unsupported readable format: {suffix}"
 
 
 class InspectFileTool(Tool):
     name = "inspect_local_file"
     description = (
-        "Inspect a local GAIA attachment and return its type, size, "
-        "dimensions for images, and basic metadata."
+        "Inspect a local GAIA attachment and return path, type, size, "
+        "and basic metadata."
     )
     inputs = {
         "path": {
             "type": "string",
-            "description": "Absolute or repository-local path to the file.",
+            "description": "Absolute or repository local path to the file.",
         },
     }
     output_type = "string"
@@ -97,5 +118,19 @@ class InspectFileTool(Tool):
                     result.append(f"dimensions: {image.size[0]}x{image.size[1]}")
             except Exception as exc:
                 result.append(f"image_error: {exc}")
+
+        if file_path.suffix.lower() == ".xlsx":
+            try:
+                from openpyxl import load_workbook
+
+                workbook = load_workbook(
+                    str(file_path),
+                    read_only=True,
+                    data_only=False,
+                )
+                result.append(f"sheets: {', '.join(workbook.sheetnames)}")
+                workbook.close()
+            except Exception as exc:
+                result.append(f"xlsx_error: {exc}")
 
         return "\n".join(result)
