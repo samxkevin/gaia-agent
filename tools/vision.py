@@ -1,23 +1,24 @@
 import base64
 import mimetypes
+import re
 from pathlib import Path
 
 from smolagents import Tool
 
-from config import COHERE_API_KEY, COHERE_MODEL
+from config import COHERE_API_KEY, COHERE_MODEL, TRANSCRIPTION_MODEL
 
 
 class AnalyzeImageTool(Tool):
     name = "analyze_image"
     description = (
-        "Analyze a local image with Cohere Command A+. Use this when a GAIA "
-        "task requires visual understanding, OCR-like reading, object "
-        "identification, spatial relationships, charts, or image reasoning."
+        "Analyze a local image with Cohere Command A+. Use this for visual "
+        "reasoning, OCR like reading, charts, diagrams, chess positions, "
+        "objects, spatial relationships, or other image based evidence."
     )
     inputs = {
         "path": {
             "type": "string",
-            "description": "Absolute or repository-local path to the image.",
+            "description": "Absolute or repository local path to the image.",
         },
         "question": {
             "type": "string",
@@ -36,14 +37,13 @@ class AnalyzeImageTool(Tool):
 
         mime_type, _ = mimetypes.guess_type(file_path.name)
         if mime_type not in {
-            "image/png", "image/jpeg", "image/webp", "image/gif"
+            "image/png", "image/jpeg", "image/webp", "image/gif",
         }:
             return f"Unsupported image type: {mime_type}"
 
         import cohere
 
         data = base64.b64encode(file_path.read_bytes()).decode("utf-8")
-
         client = cohere.ClientV2(COHERE_API_KEY)
         response = client.chat(
             model=COHERE_MODEL,
@@ -65,3 +65,95 @@ class AnalyzeImageTool(Tool):
         )
 
         return response.message.content[0].text
+
+
+class TranscribeAudioTool(Tool):
+    name = "transcribe_audio"
+    description = (
+        "Transcribe a local MP3, WAV, OGG, FLAC, MPEG, or MPGA attachment "
+        "with Cohere Transcribe."
+    )
+    inputs = {
+        "path": {
+            "type": "string",
+            "description": "Absolute or repository local path to the audio file.",
+        },
+    }
+    output_type = "string"
+
+    def forward(self, path: str) -> str:
+        if not COHERE_API_KEY:
+            return "COHERE_API_KEY is not configured."
+
+        file_path = Path(path).expanduser().resolve()
+        if not file_path.is_file():
+            return f"Audio not found: {file_path}"
+
+        if file_path.suffix.lower() not in {
+            ".mp3", ".wav", ".ogg", ".flac", ".mpeg", ".mpga",
+        }:
+            return f"Unsupported audio type: {file_path.suffix.lower()}"
+
+        import cohere
+
+        client = cohere.ClientV2(COHERE_API_KEY)
+        with file_path.open("rb") as audio_file:
+            response = client.audio.transcriptions.create(
+                model=TRANSCRIPTION_MODEL,
+                language="en",
+                file=audio_file,
+            )
+
+        text = getattr(response, "text", None)
+        if text:
+            return text
+
+        return str(response)
+
+
+class YouTubeTranscriptTool(Tool):
+    name = "get_youtube_transcript"
+    description = (
+        "Retrieve captions or an automatically generated transcript for a "
+        "YouTube video. Use this for questions asking what was said in a video."
+    )
+    inputs = {
+        "video_id": {
+            "type": "string",
+            "description": "The YouTube video ID, not the full URL.",
+        },
+    }
+    output_type = "string"
+
+    def forward(self, video_id: str) -> str:
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+
+            transcript = YouTubeTranscriptApi().fetch(
+                video_id,
+                languages=["en"],
+            )
+            return "\n".join(snippet.text for snippet in transcript)
+        except Exception as exc:
+            return f"Could not fetch YouTube transcript: {exc}"
+
+
+class ExtractYouTubeIdTool(Tool):
+    name = "extract_youtube_id"
+    description = "Extract the video ID from a YouTube URL."
+    inputs = {
+        "url": {
+            "type": "string",
+            "description": "A standard YouTube watch URL or short URL.",
+        },
+    }
+    output_type = "string"
+
+    def forward(self, url: str) -> str:
+        match = re.search(
+            r"(?:v=|youtu\.be/|youtube\.com/embed/)([A-Za-z0-9_-]{6,})",
+            url,
+        )
+        if not match:
+            return "Could not extract a YouTube video ID."
+        return match.group(1)
