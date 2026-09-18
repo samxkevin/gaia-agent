@@ -13,6 +13,7 @@ def main():
     )
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--task-id")
+    parser.add_argument("--expected")
     parser.add_argument("--keep-attachment", action="store_true")
     args = parser.parse_args()
 
@@ -47,7 +48,14 @@ def main():
     )
     elapsed = time.perf_counter() - started
 
-    print("\n" + "=" * 72)
+    exact_match = None
+    if args.expected is not None:
+        exact_match = answer == args.expected
+        print(f"expected: {args.expected}")
+        print(f"exact_match: {exact_match}")
+
+    print("
+" + "=" * 72)
     print("AGENT RESULT")
     print("=" * 72)
     print(f"answer: {answer}")
@@ -64,6 +72,8 @@ def main():
         "file_name": file_name,
         "attachment_path": attachment_path,
         "answer": answer,
+        "expected": args.expected,
+        "exact_match": exact_match,
         "elapsed_seconds": round(elapsed, 3),
         "steps": len(result.steps) if hasattr(result, "steps") else None,
         "token_usage": str(getattr(result, "token_usage", None)),
