@@ -46,6 +46,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Check fallback key
+        run: |
+          if [ -z "$COHERE_FALLBACK_API_KEY" ]; then
+            echo "Warning: COHERE_FALLBACK_API_KEY is not configured. Running with one key."
+          else
+            echo "Both Cohere keys are configured."
+          fi
+
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
@@ -59,8 +67,8 @@ jobs:
 
       - name: Check Cohere key
         run: |
-          if [ -z "$COHERE_API_KEY" ]; then
-            echo "COHERE_API_KEY is not configured in GitHub repository secrets."
+          if [ -z "$COHERE_PRIMARY_API_KEY" ]; then
+            echo "COHERE_PRIMARY_API_KEY is not configured in GitHub repository secrets."
             exit 1
           fi
           echo "Cohere key is configured."
