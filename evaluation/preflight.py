@@ -2,6 +2,7 @@ import importlib.util
 import os
 
 from evaluation.client import fetch_questions
+from config import COHERE_FALLBACK_MODEL
 from models import get_chat_routes
 
 
@@ -10,6 +11,10 @@ def main():
 
     if not (os.getenv("COHERE_PRIMARY_API_KEY") or os.getenv("COHERE_API_KEY")):
         missing.append("COHERE_PRIMARY_API_KEY")
+    if not os.getenv("COHERE_FALLBACK_API_KEY"):
+        missing.append("COHERE_FALLBACK_API_KEY")
+    if COHERE_FALLBACK_MODEL == "command-a-03-2025":
+        missing.append("COHERE_FALLBACK_MODEL is still the legacy command-a-03-2025")
 
     for module in (
         "smolagents",
@@ -55,6 +60,7 @@ def main():
     print(f"Level: {first['Level']}")
     print(f"Attachment: {first['file_name'] or '<none>'}")
     print(f"Configured chat routes: {len(routes)}")
+    print(f"Fallback model: {COHERE_FALLBACK_MODEL}")
 
     for route in routes:
         print(f"  {route.key_slot} -> {route.model_id}")
