@@ -75,10 +75,9 @@ def create_agent():
     return ToolCallingAgent(
         tools=tools,
         model=create_model(),
-        max_steps=MAX_AGENT_STEPS,
+        max_steps=min(MAX_AGENT_STEPS, 10),
         verbosity_level=2,
         planning_interval=None,
-        max_steps=min(MAX_AGENT_STEPS, 10),
         instructions=SYSTEM_PROMPT,
         return_full_result=True,
         max_tool_threads=3,
