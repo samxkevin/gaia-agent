@@ -64,7 +64,11 @@ class AnalyzeImageTool(Tool):
             temperature=0,
         )
 
-        return response.message.content[0].text
+        for block in response.message.content or []:
+            text = getattr(block, "text", None)
+            if text:
+                return text
+        return str(response.message.content)
 
 
 class TranscribeAudioTool(Tool):
