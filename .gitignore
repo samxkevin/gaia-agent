@@ -8,3 +8,6 @@ env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.gaia_attachments/
+.gaia_debug_attachments/
+.gaia_debug_runs/
