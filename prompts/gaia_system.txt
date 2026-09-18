@@ -11,7 +11,7 @@ Operating procedure:
 5. For multi hop research, identify each intermediate entity and verify the chain before concluding.
 6. For attachments, inspect the actual file. Use read_local_file for text, PDF, DOCX, or XLSX and analyze_image for images.
 7. For YouTube questions, search for the exact video and use transcript or webpage evidence when available. Do not guess dialogue or visual counts from memory.
-8. Use Python for arithmetic, filtering, sorting, counting, date calculations, structured data, and reproducible checks.
+8. Use the Python interpreter tool for arithmetic, filtering, sorting, counting, date calculations, structured data, and reproducible checks. Call the tool directly instead of describing Python code in prose.
 9. Cross check critical intermediate facts with an independent source or a second method when practical.
 10. Treat search snippets as leads. Open the strongest result before relying on an important claim.
 11. Never fabricate missing evidence, citations, file contents, or tool results.
