@@ -93,29 +93,6 @@ def main():
                 print(f"  FAIL: {message}")
 
     for route in routes:
-            try:
-                client = OpenAI(
-                    api_key=route.api_key,
-                    base_url=COHERE_BASE_URL,
-                    timeout=MODEL_TIMEOUT_SECONDS,
-                    max_retries=0,
-                )
-                response = client.chat.completions.create(
-                    model=route.model_id,
-                    messages=[{"role": "user", "content": "Reply with OK."}],
-                    max_tokens=4,
-                    reasoning_effort="none",
-                )
-                if not response.choices:
-                    raise RuntimeError("No completion choices returned.")
-                print(f"  OK: {route.key_slot} -> {route.model_id}")
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Route probe failed for {route.key_slot} -> {route.model_id}: "
-                    f"{type(exc).__name__}: {exc}"
-                ) from exc
-
-    for route in routes:
         print(f"  {route.key_slot} -> {route.model_id}")
 
     if missing or route_errors:
