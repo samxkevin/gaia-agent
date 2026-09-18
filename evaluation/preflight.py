@@ -2,7 +2,7 @@ import importlib.util
 import os
 
 from evaluation.client import fetch_questions
-from config import COHERE_FALLBACK_MODEL
+from config import COHERE_FALLBACK_MODEL, COHERE_BASE_URL, MODEL_TIMEOUT_SECONDS
 from models import get_chat_routes
 
 
@@ -61,6 +61,33 @@ def main():
     print(f"Attachment: {first['file_name'] or '<none>'}")
     print(f"Configured chat routes: {len(routes)}")
     print(f"Fallback model: {COHERE_FALLBACK_MODEL}")
+
+    if not missing:
+        from openai import OpenAI
+
+        print("Probing all configured model/key routes...")
+        for route in routes:
+            try:
+                client = OpenAI(
+                    api_key=route.api_key,
+                    base_url=COHERE_BASE_URL,
+                    timeout=MODEL_TIMEOUT_SECONDS,
+                    max_retries=0,
+                )
+                response = client.chat.completions.create(
+                    model=route.model_id,
+                    messages=[{"role": "user", "content": "Reply with OK."}],
+                    max_tokens=4,
+                    reasoning_effort="none",
+                )
+                if not response.choices:
+                    raise RuntimeError("No completion choices returned.")
+                print(f"  OK: {route.key_slot} -> {route.model_id}")
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Route probe failed for {route.key_slot} -> {route.model_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
 
     for route in routes:
         print(f"  {route.key_slot} -> {route.model_id}")
