@@ -46,6 +46,17 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python
+        run: python -m compileall -q .
+
+      - name: Import project
+        env:
+          COHERE_API_KEY: smoke
+        run: python -c "import agent; import evaluation.client; import evaluation.debug; print('imports: OK')"
+
       - name: Check Cohere key
         run: |
           if [ -z "$COHERE_API_KEY" ]; then
@@ -53,9 +64,6 @@ jobs:
             exit 1
           fi
           echo "Cohere key is configured."
-
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt
 
       - name: Run first GAIA question
         run: python -m evaluation.debug --index 0 --expected 3
