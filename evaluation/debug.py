@@ -54,8 +54,8 @@ def main():
         print(f"expected: {args.expected}")
         print(f"exact_match: {exact_match}")
 
-    print("
-" + "=" * 72)
+    print()
+    print("=" * 72)
     print("AGENT RESULT")
     print("=" * 72)
     print(f"answer: {answer}")
