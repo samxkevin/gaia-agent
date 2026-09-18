@@ -27,11 +27,25 @@ class WikipediaPageAsOfTool(Tool):
     }
     output_type = "string"
 
+    def __init__(self):
+        super().__init__()
+        self._cache: dict[tuple[str, str], str] = {}
+
     def forward(self, title: str, date: str) -> str:
         try:
             cutoff = date_type.fromisoformat(date)
         except ValueError:
             return f"Invalid date: {date}. Use YYYY-MM-DD."
+
+        cache_key = (title.strip().lower(), cutoff.isoformat())
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return (
+                f"Historical Wikipedia page already fetched for '{title}' on "
+                f"{cutoff.isoformat()}. Reuse the earlier observation instead of "
+                "fetching the same revision again.\n\n"
+                f"{cached}"
+            )
 
         params = {
             "action": "query",
@@ -80,10 +94,12 @@ class WikipediaPageAsOfTool(Tool):
         if not content:
             return f"Historical revision for '{title}' contains no page content."
 
-        return (
+        result = (
             f"Wikipedia page: {page.get('title', title)}\n"
             f"Revision ID: {revision.get('revid', '')}\n"
             f"Revision timestamp: {revision.get('timestamp', '')}\n"
             f"Cutoff date: {cutoff.isoformat()}\n\n"
             f"{content[:MAX_TOOL_TEXT]}"
         )
+        self._cache[cache_key] = result
+        return result
