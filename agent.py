@@ -36,46 +36,66 @@ def create_model():
     return FailoverModel()
 
 
-def create_agent():
-    tools = [
-        DuckDuckGoSearchTool(
-            max_results=WEB_MAX_RESULTS,
-            rate_limit=WEB_RATE_LIMIT,
-        ),
-        WikipediaPageAsOfTool(),
-        WikipediaSearchTool(
-            user_agent="gaia-agent/1.0",
-            language="en",
-            content_type="text",
-            extract_format="WIKI",
-        ),
-        VisitWebpageTool(max_output_length=MAX_WEBPAGE_TEXT),
-        PythonInterpreterTool(
-            authorized_imports=[
-                "math",
-                "statistics",
-                "datetime",
-                "json",
-                "re",
-                "csv",
-                "collections",
-                "itertools",
-                "pathlib",
-            ],
-            timeout_seconds=30,
-        ),
-        ReadFileTool(),
-        InspectFileTool(),
-        AnalyzeImageTool(),
-        TranscribeAudioTool(),
-        ExtractYouTubeIdTool(),
-        YouTubeTranscriptTool(),
-    ]
+def _is_historical_wikipedia_task(question: str) -> bool:
+    text = question.lower()
+    return (
+        "wikipedia" in text
+        and (
+            "latest 20" in text
+            or "version of english wikipedia" in text
+            or "version of wikipedia" in text
+            or "as of 20" in text
+        )
+    )
+
+
+def create_agent(question: str | None = None):
+    historical_wikipedia = bool(question and _is_historical_wikipedia_task(question))
+
+    if historical_wikipedia:
+        tools = [WikipediaPageAsOfTool()]
+        max_steps = min(MAX_AGENT_STEPS, 4)
+    else:
+        tools = [
+            DuckDuckGoSearchTool(
+                max_results=WEB_MAX_RESULTS,
+                rate_limit=WEB_RATE_LIMIT,
+            ),
+            WikipediaPageAsOfTool(),
+            WikipediaSearchTool(
+                user_agent="gaia-agent/1.0",
+                language="en",
+                content_type="text",
+                extract_format="WIKI",
+            ),
+            VisitWebpageTool(max_output_length=MAX_WEBPAGE_TEXT),
+            PythonInterpreterTool(
+                authorized_imports=[
+                    "math",
+                    "statistics",
+                    "datetime",
+                    "json",
+                    "re",
+                    "csv",
+                    "collections",
+                    "itertools",
+                    "pathlib",
+                ],
+                timeout_seconds=30,
+            ),
+            ReadFileTool(),
+            InspectFileTool(),
+            AnalyzeImageTool(),
+            TranscribeAudioTool(),
+            ExtractYouTubeIdTool(),
+            YouTubeTranscriptTool(),
+        ]
+        max_steps = min(MAX_AGENT_STEPS, 10)
 
     return ToolCallingAgent(
         tools=tools,
         model=create_model(),
-        max_steps=min(MAX_AGENT_STEPS, 10),
+        max_steps=max_steps,
         verbosity_level=2,
         planning_interval=None,
         instructions=SYSTEM_PROMPT,
@@ -103,7 +123,7 @@ def clean_answer(value) -> str:
 
 
 def solve(question: str, attachment_path: str | None = None, debug: bool = False):
-    agent = create_agent()
+    agent = create_agent(question)
 
     if attachment_path:
         question = (
