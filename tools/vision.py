@@ -5,7 +5,8 @@ from pathlib import Path
 
 from smolagents import Tool
 
-from config import COHERE_API_KEY, COHERE_MODEL, TRANSCRIPTION_MODEL
+from config import COHERE_PRIMARY_TRANSCRIPTION_MODEL
+from models import CohereFailoverClient
 
 
 class AnalyzeImageTool(Tool):
@@ -28,9 +29,6 @@ class AnalyzeImageTool(Tool):
     output_type = "string"
 
     def forward(self, path: str, question: str) -> str:
-        if not COHERE_API_KEY:
-            return "COHERE_API_KEY is not configured."
-
         file_path = Path(path).expanduser().resolve()
         if not file_path.is_file():
             return f"Image not found: {file_path}"
@@ -41,12 +39,9 @@ class AnalyzeImageTool(Tool):
         }:
             return f"Unsupported image type: {mime_type}"
 
-        import cohere
-
         data = base64.b64encode(file_path.read_bytes()).decode("utf-8")
-        client = cohere.ClientV2(COHERE_API_KEY)
+        client = CohereFailoverClient()
         response = client.chat(
-            model=COHERE_MODEL,
             messages=[
                 {
                     "role": "user",
@@ -68,6 +63,7 @@ class AnalyzeImageTool(Tool):
             text = getattr(block, "text", None)
             if text:
                 return text
+
         return str(response.message.content)
 
 
@@ -75,7 +71,7 @@ class TranscribeAudioTool(Tool):
     name = "transcribe_audio"
     description = (
         "Transcribe a local MP3, WAV, OGG, FLAC, MPEG, or MPGA attachment "
-        "with Cohere Transcribe."
+        "with Cohere Transcribe using primary and fallback keys."
     )
     inputs = {
         "path": {
@@ -86,9 +82,6 @@ class TranscribeAudioTool(Tool):
     output_type = "string"
 
     def forward(self, path: str) -> str:
-        if not COHERE_API_KEY:
-            return "COHERE_API_KEY is not configured."
-
         file_path = Path(path).expanduser().resolve()
         if not file_path.is_file():
             return f"Audio not found: {file_path}"
@@ -98,15 +91,11 @@ class TranscribeAudioTool(Tool):
         }:
             return f"Unsupported audio type: {file_path.suffix.lower()}"
 
-        import cohere
-
-        client = cohere.ClientV2(COHERE_API_KEY)
-        with file_path.open("rb") as audio_file:
-            response = client.audio.transcriptions.create(
-                model=TRANSCRIPTION_MODEL,
-                language="en",
-                file=audio_file,
-            )
+        client = CohereFailoverClient()
+        response = client.transcribe(
+            file_path,
+            language="en",
+        )
 
         text = getattr(response, "text", None)
         if text:
