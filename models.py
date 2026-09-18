@@ -114,6 +114,7 @@ class FailoverModel(Model):
             temperature=0,
             reasoning_effort=self._reasoning_effort(route.model_id),
             max_tokens=4096,
+            tool_choice=None,
         )
 
     def _ordered_routes(self) -> list[Route]:
