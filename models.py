@@ -110,6 +110,7 @@ class FailoverModel(Model):
                 "max_retries": MODEL_MAX_RETRIES,
                 "timeout": MODEL_TIMEOUT_SECONDS,
             },
+            retry=False,
             temperature=0,
             reasoning_effort="high",
             max_tokens=4096,
