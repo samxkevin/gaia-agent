@@ -28,7 +28,7 @@ The full submission runner refuses to submit partial results.
 
 ## First question
 
-The live GAIA endpoint currently exposes the first Level 1 task as a Mercedes Sosa studio album question. The debugger defaults to index 0. citeturn763795view0
+The live GAIA endpoint currently exposes the first Level 1 task as a Mercedes Sosa studio album question. The debugger defaults to index 0.
 
 ## Setup
 
