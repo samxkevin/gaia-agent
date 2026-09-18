@@ -1,4 +1,5 @@
 from tools.file_tools import InspectFileTool, ReadFileTool
+from tools.historical_wikipedia import WikipediaPageAsOfTool
 from tools.vision import (
     AnalyzeImageTool,
     ExtractYouTubeIdTool,
@@ -12,5 +13,6 @@ __all__ = [
     "InspectFileTool",
     "ReadFileTool",
     "TranscribeAudioTool",
+    "WikipediaPageAsOfTool",
     "YouTubeTranscriptTool",
 ]
