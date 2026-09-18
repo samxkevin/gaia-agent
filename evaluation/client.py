@@ -38,7 +38,7 @@ def fetch_question(index: int | None = None, task_id: str | None = None):
 def download_file(task_id: str, file_name: str, output_dir: str):
     destination_dir = Path(output_dir)
     destination_dir.mkdir(parents=True, exist_ok=True)
-    output_path = destination_dir / file_name
+    output_path = destination_dir / Path(file_name).name
 
     response = SESSION.get(
         f"{GAIA_API_URL}/files/{task_id}",
