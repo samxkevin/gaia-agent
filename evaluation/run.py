@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from agent import solve
 from config import AGENT_CODE_URL, HF_USERNAME
 from evaluation.client import download_file, fetch_questions, submit_answers
@@ -6,6 +8,7 @@ from evaluation.client import download_file, fetch_questions, submit_answers
 def run():
     questions = fetch_questions()
     answers = []
+    Path(".gaia_attachments").mkdir(exist_ok=True)
 
     for i, task in enumerate(questions, start=1):
         task_id = task["id"]
