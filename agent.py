@@ -19,7 +19,14 @@ from config import (
     WEB_MAX_RESULTS,
     WEB_RATE_LIMIT,
 )
-from tools import AnalyzeImageTool, InspectFileTool, ReadFileTool
+from tools import (
+    AnalyzeImageTool,
+    ExtractYouTubeIdTool,
+    InspectFileTool,
+    ReadFileTool,
+    TranscribeAudioTool,
+    YouTubeTranscriptTool,
+)
 
 ROOT = Path(__file__).resolve().parent
 SYSTEM_PROMPT = (ROOT / "prompts" / "gaia_system.txt").read_text(encoding="utf-8")
@@ -71,6 +78,9 @@ def create_agent():
         ReadFileTool(),
         InspectFileTool(),
         AnalyzeImageTool(),
+        TranscribeAudioTool(),
+        ExtractYouTubeIdTool(),
+        YouTubeTranscriptTool(),
     ]
 
     return CodeAgent(
