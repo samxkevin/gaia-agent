@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -185,6 +187,17 @@ class FailoverModel(Model):
                     tools_to_call_from=tools_to_call_from,
                     **kwargs,
                 )
+                result = self._repair_malformed_final_answer(
+                    delegate=delegate,
+                    result=result,
+                    messages=messages,
+                    final_answer_tool=self._find_final_answer_tool(
+                        tools_to_call_from
+                    ),
+                    stop_sequences=stop_sequences,
+                    response_format=response_format,
+                    kwargs=kwargs,
+                )
                 self._record_success(route)
                 return result
             except Exception as exc:
@@ -199,6 +212,117 @@ class FailoverModel(Model):
             "All Cohere model routes failed. " + " | ".join(errors)
         )
 
+    @staticmethod
+    def _find_final_answer_tool(tools):
+        return next(
+            (tool for tool in (tools or []) if tool.name == "final_answer"),
+            None,
+        )
+
+    @staticmethod
+    def _final_answer_arguments(result):
+        """Return parsed arguments only for a single final_answer-only call."""
+        calls = result.tool_calls or []
+        if len(calls) != 1 or calls[0].function.name != "final_answer":
+            return None
+
+        arguments = calls[0].function.arguments
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (TypeError, ValueError):
+                return None
+        return arguments if isinstance(arguments, dict) else None
+
+    @classmethod
+    def _has_valid_final_answer(cls, result) -> bool:
+        arguments = cls._final_answer_arguments(result)
+        if arguments is None or "answer" not in arguments:
+            return False
+        answer = arguments["answer"]
+        if answer is None:
+            return False
+        return not isinstance(answer, str) or bool(answer.strip())
+
+    @classmethod
+    def _has_malformed_final_answer(cls, result) -> bool:
+        return any(
+            call.function.name == "final_answer"
+            for call in (result.tool_calls or [])
+        ) and not cls._has_valid_final_answer(result)
+
+    @staticmethod
+    def _reasoning_content(result) -> str:
+        """Keep reasoning retained by OpenAIModel in the raw provider response."""
+        candidates = [getattr(result, "reasoning_content", None)]
+        raw = getattr(result, "raw", None)
+        try:
+            message = raw.choices[0].message
+            candidates.extend(
+                [
+                    getattr(message, "reasoning_content", None),
+                    getattr(message, "reasoning", None),
+                ]
+            )
+            model_extra = getattr(message, "model_extra", None) or {}
+            candidates.extend(
+                [model_extra.get("reasoning_content"), model_extra.get("reasoning")]
+            )
+        except (AttributeError, IndexError, TypeError):
+            pass
+
+        for candidate in candidates:
+            if candidate is not None and str(candidate).strip():
+                return str(candidate).strip()
+        return str(result.content or "").strip()
+
+    def _repair_malformed_final_answer(
+        self,
+        *,
+        delegate,
+        result,
+        messages,
+        final_answer_tool,
+        stop_sequences,
+        response_format,
+        kwargs,
+    ):
+        """Repair Cohere compatibility responses that omit final_answer.answer."""
+        if final_answer_tool is None or not self._has_malformed_final_answer(result):
+            return result
+
+        prior_reasoning = self._reasoning_content(result)
+        repair_messages = list(messages) + [
+            {
+                "role": "user",
+                "content": (
+                    "Your preceding response selected final_answer but omitted its "
+                    "required answer argument. Do not research or reconsider the "
+                    "task. Using the conclusion already reached, call final_answer "
+                    "now with exactly one non-empty argument named answer. The "
+                    "answer value must contain only what the original task requests."
+                    + (
+                        f"\n\nPreceding reasoning:\n{prior_reasoning}"
+                        if prior_reasoning
+                        else ""
+                    )
+                ),
+            }
+        ]
+        try:
+            repaired = delegate.generate(
+                repair_messages,
+                stop_sequences=stop_sequences,
+                response_format=response_format,
+                tools_to_call_from=[final_answer_tool],
+                **kwargs,
+            )
+        except Exception:
+            return result
+
+        if not self._has_valid_final_answer(repaired):
+            return result
+        return repaired
     @staticmethod
     def _reasoning_effort(model_id: str) -> str:
         model_name = model_id.lower()
