@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from smolagents import (
-    CodeAgent,
+    ToolCallingAgent,
     DuckDuckGoSearchTool,
     PythonInterpreterTool,
     VisitWebpageTool,
@@ -70,7 +70,7 @@ def create_agent():
         YouTubeTranscriptTool(),
     ]
 
-    return CodeAgent(
+    return ToolCallingAgent(
         tools=tools,
         model=create_model(),
         max_steps=MAX_AGENT_STEPS,
