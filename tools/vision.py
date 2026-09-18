@@ -5,7 +5,6 @@ from pathlib import Path
 
 from smolagents import Tool
 
-from config import COHERE_PRIMARY_TRANSCRIPTION_MODEL
 from models import CohereFailoverClient
 
 
