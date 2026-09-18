@@ -1,46 +1,62 @@
 # GAIA Agent
 
-A tool using general purpose AI agent for the GAIA benchmark.
-
-## Goal
-
-Build a reliable agent for the GAIA Level 1 validation subset used by the Agents Course Unit 4 evaluation.
-
-The agent is designed around:
-
-- strong reasoning and planning
-- web search and webpage retrieval
-- local file handling
-- Python execution for calculations and data processing
-- answer verification
-- exact answer extraction for GAIA submission
+A general purpose agent for the GAIA benchmark, built around Cohere Command A+ and smolagents.
 
 ## Architecture
 
-```
 GAIA question
-    ↓
-Agent planner
-    ↓
-Tool use
-    ├── web search
-    ├── webpage retrieval
-    ├── file analysis
-    └── Python execution
-    ↓
-Verification
-    ↓
-Final answer extraction
-    ↓
-GAIA submission
-```
+    |
+Question parser
+    |
+CodeAgent with Command A+
+    |-- DuckDuckGo web search
+    |-- Wikipedia retrieval
+    |-- webpage retrieval
+    |-- Python execution
+    |-- local text, PDF, DOCX, XLSX reading
+    |-- image analysis with Command A+
+    |
+Verification and exact answer cleanup
+    |
+GAIA answer payload
 
-## Status
+## Development rule
 
-Initial repository scaffold. Model and tool implementations will be added incrementally and evaluated against the official course evaluation API.
+evaluation/debug.py runs exactly one task and never calls /submit.
 
-## Configuration
+The full submission runner refuses to submit partial results.
 
-Copy `.env.example` to `.env` and configure the required API credentials.
+## First question
 
-Never commit API keys or other secrets.
+The live GAIA endpoint currently exposes the first Level 1 task as a Mercedes Sosa studio album question. The debugger defaults to index 0. citeturn763795view0
+
+## Setup
+
+Create the environment and install dependencies:
+
+    python -m venv .venv
+    .venv\Scripts\activate
+    pip install -r requirements.txt
+
+Copy .env.example to .env and set COHERE_API_KEY.
+
+## Run one question
+
+    python -m evaluation.debug
+
+Run another task:
+
+    python -m evaluation.debug --index 3
+    python -m evaluation.debug --task-id YOUR_TASK_ID
+
+The debugger does not submit anything.
+
+## Full submission
+
+Only after local validation:
+
+    python -m evaluation.run
+
+The submission runner requires HF_USERNAME and AGENT_CODE_URL and will submit only after every question produces an answer.
+
+Never commit API keys or runtime artifacts.
