@@ -38,21 +38,14 @@ jobs:
     needs: verify_api
     runs-on: ubuntu-latest
     env:
-      COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+      COHERE_PRIMARY_API_KEY: ${{ secrets.COHERE_PRIMARY_API_KEY }}
+      COHERE_FALLBACK_API_KEY: ${{ secrets.COHERE_FALLBACK_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Check fallback key
-        run: |
-          if [ -z "$COHERE_FALLBACK_API_KEY" ]; then
-            echo "Warning: COHERE_FALLBACK_API_KEY is not configured. Running with one key."
-          else
-            echo "Both Cohere keys are configured."
-          fi
 
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
@@ -61,23 +54,20 @@ jobs:
         run: python -m compileall -q .
 
       - name: Import project
-        env:
-          COHERE_API_KEY: smoke
-        run: python -c "import agent; import evaluation.client; import evaluation.debug; print('imports: OK')"
+        run: python -c "import agent; import models; import evaluation.client; import evaluation.debug; print('imports: OK')"
 
-      - name: Compile Python
-        run: python -m compileall -q .
-
-      - name: Import project
-        run: python -c "import agent; import evaluation.client; import evaluation.debug; print('imports: OK')"
-
-      - name: Check Cohere key
+      - name: Check Cohere keys
         run: |
           if [ -z "$COHERE_PRIMARY_API_KEY" ]; then
-            echo "COHERE_PRIMARY_API_KEY is not configured in GitHub repository secrets."
+            echo "COHERE_PRIMARY_API_KEY is not configured."
             exit 1
           fi
-          echo "Cohere key is configured."
+
+          if [ -z "$COHERE_FALLBACK_API_KEY" ]; then
+            echo "Warning: COHERE_FALLBACK_API_KEY is not configured. Continuing with one key."
+          else
+            echo "Both Cohere keys are configured."
+          fi
 
       - name: Run first GAIA question
         run: python -m evaluation.debug --index 0 --expected 3
