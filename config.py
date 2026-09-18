@@ -24,8 +24,8 @@ COHERE_BASE_URL = os.getenv(
     "https://api.cohere.ai/compatibility/v1",
 )
 
-MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "14"))
-PLANNING_INTERVAL = int(os.getenv("PLANNING_INTERVAL", "4"))
+MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "18"))
+PLANNING_INTERVAL = int(os.getenv("PLANNING_INTERVAL", "5"))
 WEB_MAX_RESULTS = int(os.getenv("WEB_MAX_RESULTS", "8"))
 WEB_RATE_LIMIT = float(os.getenv("WEB_RATE_LIMIT", "1.0"))
 
