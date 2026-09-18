@@ -42,6 +42,7 @@ def create_model():
         model_id=COHERE_MODEL,
         api_base=COHERE_BASE_URL,
         api_key=COHERE_API_KEY,
+        client_kwargs={"max_retries": 5, "timeout": 120},
         temperature=0,
         reasoning_effort="high",
         max_tokens=4096,
@@ -91,6 +92,7 @@ def create_agent():
         planning_interval=PLANNING_INTERVAL,
         instructions=SYSTEM_PROMPT,
         return_full_result=True,
+        use_structured_outputs_internally=True,
     )
 
 
