@@ -1,6 +1,6 @@
 from agent import solve
 from config import AGENT_CODE_URL, HF_USERNAME
-from evaluation.client import fetch_questions, submit_answers
+from evaluation.client import download_file, fetch_questions, submit_answers
 
 
 def run():
@@ -14,7 +14,11 @@ def run():
         print(f"[{i}/{len(questions)}] {task_id}")
 
         try:
-            answer = solve(instruction)
+            attachment_path = None
+            if task.get("file"):
+                attachment_path = f".gaia_attachments/{task_id}"
+                download_file(task_id, attachment_path)
+            answer = solve(instruction, attachment_path=attachment_path)
             print(f"Answer: {answer}")
             answers.append(
                 {
