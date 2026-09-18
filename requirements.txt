@@ -1,4 +1,8 @@
 smolagents
+openai
+cohere
 requests
 httpx
 python-dotenv
+pypdf
+pillow
