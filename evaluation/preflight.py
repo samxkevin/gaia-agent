@@ -11,7 +11,7 @@ def main():
     if not (os.getenv("COHERE_PRIMARY_API_KEY") or os.getenv("COHERE_API_KEY")):
         missing.append("COHERE_PRIMARY_API_KEY")
 
-    for module in ("smolagents", "openai", "cohere", "requests"):
+    for module in ("smolagents", "openai", "cohere", "requests", "ddgs", "wikipediaapi"):
         if importlib.util.find_spec(module) is None:
             missing.append(f"python package: {module}")
 
@@ -27,6 +27,17 @@ def main():
         raise RuntimeError(f"GAIA schema is missing fields: {missing_fields}")
 
     routes = get_chat_routes()
+
+    from smolagents import DuckDuckGoSearchTool, WikipediaSearchTool
+
+    DuckDuckGoSearchTool(max_results=1, rate_limit=1.0)
+    WikipediaSearchTool(
+        user_agent="gaia-agent/1.0",
+        language="en",
+        content_type="text",
+        extract_format="WIKI",
+    )
+    print("Tool dependencies: OK")
 
     print(f"GAIA questions available: {len(questions)}")
     print(f"First task: {first['task_id']}")
