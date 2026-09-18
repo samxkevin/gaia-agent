@@ -24,4 +24,15 @@ COHERE_BASE_URL = os.getenv(
     "https://api.cohere.ai/compatibility/v1",
 )
 
-MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "20"))
+MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "14"))
+PLANNING_INTERVAL = int(os.getenv("PLANNING_INTERVAL", "4"))
+WEB_MAX_RESULTS = int(os.getenv("WEB_MAX_RESULTS", "8"))
+WEB_RATE_LIMIT = float(os.getenv("WEB_RATE_LIMIT", "1.0"))
+
+MAX_TOOL_TEXT = int(os.getenv("MAX_TOOL_TEXT", "100000"))
+MAX_WEBPAGE_TEXT = int(os.getenv("MAX_WEBPAGE_TEXT", "30000"))
+
+TRANSCRIPTION_MODEL = os.getenv(
+    "TRANSCRIPTION_MODEL",
+    "cohere-transcribe-03-2026",
+)
