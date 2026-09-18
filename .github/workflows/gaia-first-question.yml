@@ -1,0 +1,53 @@
+name: GAIA First Question Debug
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  verify_api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check first GAIA task
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.request
+
+          url = "https://agents-course-unit4-scoring.hf.space/questions"
+          with urllib.request.urlopen(url, timeout=30) as response:
+              questions = json.load(response)
+
+          assert questions, "GAIA returned no questions"
+          first = questions[0]
+
+          required = {"task_id", "question", "Level", "file_name"}
+          missing = required.difference(first)
+          assert not missing, f"Missing fields: {sorted(missing)}"
+
+          print("task_id:", first["task_id"])
+          print("level:", first["Level"])
+          print("file_name:", first["file_name"] or "<none>")
+          print("API schema: OK")
+          PY
+
+  agent:
+    needs: verify_api
+    if: ${{ secrets.COHERE_API_KEY != '' }}
+    runs-on: ubuntu-latest
+    env:
+      COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run first GAIA question
+        run: python -m evaluation.debug --index 0
