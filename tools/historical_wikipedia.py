@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
-from urllib.parse import urlencode
-
+from datetime import date as date_type
 import requests
 from smolagents import Tool
 
@@ -31,14 +29,9 @@ class WikipediaPageAsOfTool(Tool):
 
     def forward(self, title: str, date: str) -> str:
         try:
-            cutoff = date.fromisoformat(date) if False else None
-        except Exception:
-            cutoff = None
-        if cutoff is None:
-            try:
-                cutoff = __import__("datetime").date.fromisoformat(date)
-            except ValueError:
-                return f"Invalid date: {date}. Use YYYY-MM-DD."
+            cutoff = date_type.fromisoformat(date)
+        except ValueError:
+            return f"Invalid date: {date}. Use YYYY-MM-DD."
 
         params = {
             "action": "query",
