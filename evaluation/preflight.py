@@ -4,6 +4,19 @@ import os
 from evaluation.client import fetch_questions
 from config import COHERE_FALLBACK_MODEL, COHERE_BASE_URL, MODEL_TIMEOUT_SECONDS
 from models import get_chat_routes
+from tools.video import find_javascript_runtime
+
+
+def javascript_runtime_status():
+    runtime = find_javascript_runtime()
+    if runtime is None:
+        return None, (
+            "supported JavaScript runtime for yt-dlp: install deno, node, "
+            "quickjs, or bun"
+        )
+    name, path = runtime
+    return {"name": name, "path": path}, None
+
 
 
 def main():
@@ -24,9 +37,18 @@ def main():
         "ddgs",
         "wikipediaapi",
         "markdownify",
+        "yt_dlp",
+        "yt_dlp_ejs",
+        "imageio_ffmpeg",
+        "huggingface_hub",
+        "pyarrow",
     ):
         if importlib.util.find_spec(module) is None:
             missing.append(f"python package: {module}")
+
+    javascript_runtime, runtime_error = javascript_runtime_status()
+    if runtime_error:
+        missing.append(runtime_error)
 
     questions = fetch_questions()
     if not questions:
@@ -54,6 +76,11 @@ def main():
     )
     VisitWebpageTool(max_output_length=1000)
     print("Tool dependencies: OK")
+    if javascript_runtime:
+        print(
+            "yt-dlp JavaScript runtime: "
+            f"{javascript_runtime['name']} ({javascript_runtime['path']})"
+        )
 
     print(f"GAIA questions available: {len(questions)}")
     print(f"First task: {first['task_id']}")
@@ -91,9 +118,6 @@ def main():
                 )
                 route_errors.append(message)
                 print(f"  FAIL: {message}")
-
-    for route in routes:
-        print(f"  {route.key_slot} -> {route.model_id}")
 
     if missing or route_errors:
         problems = missing + [f"route probe failed: {error}" for error in route_errors]
