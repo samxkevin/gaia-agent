@@ -173,3 +173,22 @@ def test_temporal_count_overrides_sparse_model_request():
     assert not tool._needs_dense_temporal_sampling(
         "What color is the bird?"
     )
+
+def test_video_tool_uses_configured_vision_factory_by_default(monkeypatch):
+    import tools.video as video_module
+
+    seen = {}
+
+    class FakeClient:
+        pass
+
+    def factory(*, model_id=None):
+        seen["model_id"] = model_id
+        return FakeClient()
+
+    monkeypatch.setattr(video_module, "CohereFailoverClient", factory)
+    tool = video_module.AnalyzeYouTubeVideoTool()
+    client = tool.visual_client_factory()
+
+    assert isinstance(client, FakeClient)
+    assert seen["model_id"] == video_module.COHERE_VIDEO_MODEL
