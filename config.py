@@ -27,6 +27,11 @@ COHERE_BASE_URL = os.getenv(
     "https://api.cohere.ai/compatibility/v1",
 )
 
+COHERE_VIDEO_MODEL = os.getenv(
+    "COHERE_VIDEO_MODEL",
+    "command-a-vision-07-2025",
+)
+
 COHERE_PRIMARY_TRANSCRIPTION_MODEL = os.getenv(
     "COHERE_PRIMARY_TRANSCRIPTION_MODEL",
     "cohere-transcribe-03-2026",
