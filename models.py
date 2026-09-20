@@ -63,20 +63,26 @@ def get_chat_routes() -> list[Route]:
     return routes
 
 
-def get_vision_routes() -> list[Route]:
-    """Return only routes whose models accept image input."""
+def get_vision_routes(model_id: str | None = None) -> list[Route]:
+    """Return routes for a vision capable Cohere model."""
+    if model_id is None:
+        model_id = COHERE_PRIMARY_MODEL
+    key_pairs = [
+        ("primary_key", COHERE_PRIMARY_API_KEY),
+        ("fallback_key", COHERE_FALLBACK_API_KEY),
+    ]
     routes = [
-        route
-        for route in get_chat_routes()
-        if "command-a-plus" in route.model_id.lower()
+        Route(
+            key_slot=key_slot,
+            model_id=model_id,
+            api_key=api_key,
+        )
+        for key_slot, api_key in key_pairs
+        if api_key
     ]
     if not routes:
-        raise RuntimeError(
-            "No vision-capable Cohere route is configured; Command A+ is required."
-        )
+        raise RuntimeError("No vision capable Cohere route is configured.")
     return routes
-
-
 def get_transcription_routes() -> list[Route]:
     key_pairs = [
         ("primary_key", COHERE_PRIMARY_API_KEY),
@@ -391,8 +397,8 @@ class FailoverModel(Model):
 class CohereFailoverClient:
     """Direct Cohere client used by multimodal tools."""
 
-    def __init__(self):
-        self.routes = get_vision_routes()
+    def __init__(self, model_id: str | None = None):
+        self.routes = get_vision_routes(model_id)
         self.last_route: Route | None = None
         self.failover_count = 0
         self._cooldowns: dict[tuple[str, str], float] = {}
