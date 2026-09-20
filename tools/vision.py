@@ -142,6 +142,9 @@ class ExtractYouTubeIdTool(Tool):
     output_type = "string"
 
     def forward(self, url: str) -> str:
+        from tools.video import normalize_youtube_url
+
+        url = normalize_youtube_url(url)
         match = re.search(
             r"(?:v=|youtu\.be/|youtube\.com/embed/)([A-Za-z0-9_-]{6,})",
             url,
