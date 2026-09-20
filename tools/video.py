@@ -186,8 +186,7 @@ class AnalyzeYouTubeVideoTool(Tool):
                 {
                     "type": "text",
                     "text": (
-                        f"Visual video question: {question}
-"
+                        f"Visual video question: {question}\n"
                         "Inspect every frame independently. Report only what is actually visible, "
                         "with the supplied timestamp. For simultaneous-count questions, list the "
                         "distinct visible categories in the same frame; do not combine frames."
@@ -222,18 +221,12 @@ class AnalyzeYouTubeVideoTool(Tool):
                 {
                     "role": "user",
                     "content": (
-                        f"Question: {question}
-"
-                        f"Video duration: {duration:.2f} seconds.
-"
+                        f"Question: {question}\n"
+                        f"Video duration: {duration:.2f} seconds.\n"
                         "Aggregate the timestamped visual observations below. Answer from same-frame "
                         "visibility only; never merge objects seen at different timestamps. State the "
-                        "answer concisely and cite the strongest timestamp(s).
-
-"
-                        + "
-
-".join(observations)
+                        "answer concisely and cite the strongest timestamp(s).\n\n"
+                        + "\n\n".join(observations)
                     ),
                 }
             ],
@@ -245,5 +238,4 @@ class AnalyzeYouTubeVideoTool(Tool):
     def _response_text(response) -> str:
         blocks = response.message.content or []
         texts = [getattr(block, "text", "") for block in blocks]
-        return "
-".join(text for text in texts if text) or str(blocks)
+        return "\n".join(text for text in texts if text) or str(blocks)
