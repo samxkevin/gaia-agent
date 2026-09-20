@@ -164,3 +164,12 @@ def test_forward_composes_download_sampling_and_visual_analysis(
 
     assert seen["url"] == "https://youtu.be/abcdefghi"
     assert result == "visible question:10.0:1"
+def test_temporal_count_overrides_sparse_model_request():
+    tool = AnalyzeYouTubeVideoTool()
+
+    assert tool._needs_dense_temporal_sampling(
+        "What is the highest number of bird species on camera simultaneously?"
+    )
+    assert not tool._needs_dense_temporal_sampling(
+        "What color is the bird?"
+    )
