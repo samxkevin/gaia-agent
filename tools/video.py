@@ -12,6 +12,7 @@ from typing import Callable
 
 from smolagents import Tool
 
+from config import COHERE_VIDEO_MODEL
 from models import CohereFailoverClient
 
 
@@ -66,9 +67,11 @@ class AnalyzeYouTubeVideoTool(Tool):
     }
     output_type = "string"
 
-    def __init__(self, visual_client_factory: Callable = CohereFailoverClient):
+    def __init__(self, visual_client_factory: Callable | None = None):
         super().__init__()
-        self.visual_client_factory = visual_client_factory
+        self.visual_client_factory = visual_client_factory or (
+            lambda: CohereFailoverClient(model_id=COHERE_VIDEO_MODEL)
+        )
 
     @staticmethod
     def _needs_dense_temporal_sampling(question: str) -> bool:
@@ -198,7 +201,7 @@ class AnalyzeYouTubeVideoTool(Tool):
     def _analyze_frames(self, frames, question: str, duration: float) -> str:
         client = self.visual_client_factory()
         observations = []
-        batch_size = 10 if self._needs_dense_temporal_sampling(question) else 6
+        batch_size = 8 if self._needs_dense_temporal_sampling(question) else 6
         for start in range(0, len(frames), batch_size):
             batch = frames[start : start + batch_size]
             content = [
@@ -206,9 +209,11 @@ class AnalyzeYouTubeVideoTool(Tool):
                     "type": "text",
                     "text": (
                         f"Visual video question: {question}\n"
-                        "Inspect every frame independently. Report only what is actually visible, "
-                        "with the supplied timestamp. For simultaneous-count questions, list the "
-                        "distinct visible categories in the same frame; do not combine frames."
+                        "Treat every attached image as an independent video frame. "
+                        "Do not merge evidence between frames. Inspect small or distant birds carefully. "
+                        "For every frame, report its supplied timestamp, each visibly identifiable bird "
+                        "species, and the count of distinct species visible in that exact frame. "
+                        "Keep the count tied to that single frame. Return one concise line per frame."
                     ),
                 }
             ]
@@ -224,7 +229,8 @@ class AnalyzeYouTubeVideoTool(Tool):
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:{mime};base64,{encoded}"
+                                "url": f"data:{mime};base64,{encoded}",
+                                "detail": "high"
                             },
                         },
                     ]
@@ -235,7 +241,7 @@ class AnalyzeYouTubeVideoTool(Tool):
             )
             observations.append(self._response_text(response))
 
-        synthesis = client.chat(
+        synthesis = CohereFailoverClient().chat(
             messages=[
                 {
                     "role": "user",
