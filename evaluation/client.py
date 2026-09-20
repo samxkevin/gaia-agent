@@ -1,8 +1,9 @@
+import shutil
 from pathlib import Path
 
 import requests
 
-from config import GAIA_API_URL
+from config import GAIA_API_URL, HF_TOKEN
 
 
 SESSION = requests.Session()
@@ -35,17 +36,63 @@ def fetch_question(index: int | None = None, task_id: str | None = None):
         ) from exc
 
 
+def _official_gaia_file(task_id: str) -> Path:
+    """Resolve an attachment through official GAIA metadata, never by guessing."""
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "Attachment endpoint returned 404 and huggingface_hub is unavailable."
+        ) from exc
+
+    options = {"repo_id": "gaia-benchmark/GAIA", "repo_type": "dataset"}
+    if HF_TOKEN:
+        options["token"] = HF_TOKEN
+    try:
+        from pyarrow.parquet import read_table
+
+        metadata = Path(
+            hf_hub_download(filename="2023/validation/metadata.parquet", **options)
+        )
+        table = read_table(metadata, columns=["task_id", "file_path"])
+        record = next(
+            (
+                row
+                for row in table.to_pylist()
+                if str(row.get("task_id")) == task_id
+            ),
+            None,
+        )
+        if record is None:
+            raise RuntimeError(f"Task {task_id} is absent from official GAIA metadata.")
+        dataset_path = record.get("file_path")
+        if not dataset_path:
+            raise RuntimeError(f"Task {task_id} has no attachment path in official GAIA metadata.")
+        if Path(dataset_path).is_absolute() or ".." in Path(dataset_path).parts:
+            raise RuntimeError(f"Task {task_id} has an unsafe attachment path in GAIA metadata.")
+        return Path(hf_hub_download(filename=str(dataset_path), **options))
+    except Exception as exc:
+        raise RuntimeError(
+            "Scoring attachment endpoint returned 404 and the official gated GAIA "
+            "dataset fallback was unavailable. Request GAIA dataset access and set HF_TOKEN. "
+            f"Details: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def download_file(task_id: str, file_name: str, output_dir: str):
     destination_dir = Path(output_dir)
     destination_dir.mkdir(parents=True, exist_ok=True)
     output_path = destination_dir / Path(file_name).name
+    if output_path.is_file() and output_path.stat().st_size:
+        return str(output_path)
 
-    response = SESSION.get(
-        f"{GAIA_API_URL}/files/{task_id}",
-        timeout=60,
-    )
-    response.raise_for_status()
-    output_path.write_bytes(response.content)
+    response = SESSION.get(f"{GAIA_API_URL}/files/{task_id}", timeout=60)
+    if response.status_code == 404:
+        source = _official_gaia_file(task_id)
+        shutil.copyfile(source, output_path)
+    else:
+        response.raise_for_status()
+        output_path.write_bytes(response.content)
     return str(output_path)
 
 
