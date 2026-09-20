@@ -63,6 +63,20 @@ def get_chat_routes() -> list[Route]:
     return routes
 
 
+def get_vision_routes() -> list[Route]:
+    """Return only routes whose models accept image input."""
+    routes = [
+        route
+        for route in get_chat_routes()
+        if "command-a-plus" in route.model_id.lower()
+    ]
+    if not routes:
+        raise RuntimeError(
+            "No vision-capable Cohere route is configured; Command A+ is required."
+        )
+    return routes
+
+
 def get_transcription_routes() -> list[Route]:
     key_pairs = [
         ("primary_key", COHERE_PRIMARY_API_KEY),
@@ -378,7 +392,7 @@ class CohereFailoverClient:
     """Direct Cohere client used by multimodal tools."""
 
     def __init__(self):
-        self.routes = get_chat_routes()
+        self.routes = get_vision_routes()
         self.last_route: Route | None = None
         self.failover_count = 0
         self._cooldowns: dict[tuple[str, str], float] = {}
