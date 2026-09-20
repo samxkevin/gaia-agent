@@ -18,6 +18,7 @@ from config import (
 from models import FailoverModel
 from tools import (
     AnalyzeImageTool,
+    AnalyzeYouTubeVideoTool,
     ExtractYouTubeIdTool,
     InspectFileTool,
     WikipediaPageAsOfTool,
@@ -86,6 +87,7 @@ def create_agent(question: str | None = None):
             ReadFileTool(),
             InspectFileTool(),
             AnalyzeImageTool(),
+            AnalyzeYouTubeVideoTool(),
             TranscribeAudioTool(),
             ExtractYouTubeIdTool(),
             YouTubeTranscriptTool(),
