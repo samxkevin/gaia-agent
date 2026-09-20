@@ -60,7 +60,7 @@ class AnalyzeYouTubeVideoTool(Tool):
         },
         "max_frames": {
             "type": "integer",
-            "description": "Maximum representative frames to inspect (12 to 72).",
+            "description": "Maximum frames to inspect. Temporal maximum, simultaneous, or counting questions are automatically sampled densely.",
             "nullable": True,
         },
     }
@@ -70,6 +70,20 @@ class AnalyzeYouTubeVideoTool(Tool):
         super().__init__()
         self.visual_client_factory = visual_client_factory
 
+    @staticmethod
+    def _needs_dense_temporal_sampling(question: str) -> bool:
+        text = question.lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "simultaneously",
+                "at the same time",
+                "highest number",
+                "maximum number",
+                "peak count",
+            )
+        )
+
     def forward(
         self,
         url: str,
@@ -77,7 +91,11 @@ class AnalyzeYouTubeVideoTool(Tool):
         max_frames: int | None = 60,
     ) -> str:
         url = normalize_youtube_url(url)
-        max_frames = max(12, min(int(max_frames or 60), 72))
+        requested_frames = max(12, int(max_frames or 60))
+        if self._needs_dense_temporal_sampling(question):
+            max_frames = min(max(requested_frames, 180), 240)
+        else:
+            max_frames = min(requested_frames, 72)
         try:
             with tempfile.TemporaryDirectory(prefix="gaia-video-") as directory:
                 workdir = Path(directory)
@@ -180,8 +198,9 @@ class AnalyzeYouTubeVideoTool(Tool):
     def _analyze_frames(self, frames, question: str, duration: float) -> str:
         client = self.visual_client_factory()
         observations = []
-        for start in range(0, len(frames), 6):
-            batch = frames[start : start + 6]
+        batch_size = 10 if self._needs_dense_temporal_sampling(question) else 6
+        for start in range(0, len(frames), batch_size):
+            batch = frames[start : start + batch_size]
             content = [
                 {
                     "type": "text",
