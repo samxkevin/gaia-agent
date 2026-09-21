@@ -38,7 +38,11 @@ Create the environment and install dependencies:
     .venv\Scripts\activate
     pip install -r requirements.txt
 
-Copy .env.example to .env and set COHERE_API_KEY.
+Copy .env.example to .env and set the Cohere credentials.
+
+For numerical YouTube maximum tasks, the agent can use Adversal as a free tier visual ingestion layer. It checks the live remaining quota before submission and falls back to the native FFmpeg and Cohere pipeline when Adversal is unavailable, unauthenticated, or under quota. No paid Adversal path is used.
+
+The Adversal MCP client requires a working Python 3.13 environment through `adversal-cli`. The agent can launch it with `uvx` when available. Authenticate once through an MCP client before the first live run. The agent never stores Adversal credentials in this repository.
 
 ## Run one question
 
