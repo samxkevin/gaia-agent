@@ -121,6 +121,26 @@ def test_one_malformed_observation_does_not_discard_valid_siblings(tmp_path):
     assert [(item.timestamp, item.count) for item in observations] == [(1, 1), (3, 2)]
 
 
+def test_missing_provider_observations_get_temporal_placeholders(tmp_path):
+    frames = make_frames(tmp_path, [1, 2, 3, 4])
+    visual = FakeClient([json.dumps({"observations": [
+        {"species": ["a"], "confidence": .9}
+    ]})])
+    tool = AnalyzeYouTubeVideoTool(lambda: visual)
+    observations = tool._observe_frames(
+        frames, build_video_counting_plan("maximum species visible at once"), "coarse"
+    )
+    assert [item.timestamp for item in observations] == [1, 2, 3, 4]
+    assert [item.count for item in observations] == [1, 0, 0, 0]
+    assert tool.observation_parse_diagnostics["coarse"] == {
+        "requested_frame_count": 4,
+        "parsed_observation_count": 1,
+        "missing_observation_count": 3,
+    }
+    candidates = tool._select_candidates(observations, duration=4)
+    assert candidates
+
+
 def test_observation_calls_prefer_structured_response_format(tmp_path):
     frames = make_frames(tmp_path, [1])
     visual = FakeClient([json.dumps({"observations": [{"species": ["a"]}]})])
@@ -228,6 +248,59 @@ def test_candidate_selection_is_temporally_diverse():
     assert 78 not in timestamps
     assert 82 in timestamps
     assert 90 in timestamps
+
+
+def test_zero_count_frames_can_nominate_each_full_video_region():
+    observations = [
+        FrameObservation(float(timestamp), (), (), 0, .2, ())
+        for timestamp in range(0, 120)
+    ]
+    candidates = AnalyzeYouTubeVideoTool._select_candidates(observations, duration=120)
+    assert len(candidates) == 4
+    assert [int(item.timestamp // 30) for item in candidates] == [0, 1, 2, 3]
+
+
+def test_early_positive_cluster_cannot_eliminate_later_regions():
+    observations = [
+        FrameObservation(float(timestamp), (), (), 3 if timestamp < 30 else 0, .9, ())
+        for timestamp in range(0, 120)
+    ]
+    candidates = AnalyzeYouTubeVideoTool._select_candidates(observations, duration=120)
+    assert len(candidates) == 4
+    assert candidates[0].count == 3
+    assert any(item.timestamp >= 90 for item in candidates)
+
+
+def test_candidate_selection_across_full_duration_is_deterministic():
+    observations = [
+        FrameObservation(float(timestamp), (), (), timestamp % 3, .5, ())
+        for timestamp in range(0, 120)
+    ]
+    first = AnalyzeYouTubeVideoTool._select_candidates(observations, duration=120)
+    second = AnalyzeYouTubeVideoTool._select_candidates(observations, duration=120)
+    assert first == second
+    assert len(first) == 4
+    assert [int(item.timestamp // 30) for item in first] == [0, 1, 2, 3]
+
+
+def test_coarse_diagnostics_distinguish_zero_scores_from_missing_observations():
+    observations = [
+        FrameObservation(0, (), (), 0, .5, ()),
+        FrameObservation(1, (), ("a",), 1, .8, ()),
+        FrameObservation(2, (), (), 0, .2, ("ambiguous",)),
+    ]
+    diagnostics = AnalyzeYouTubeVideoTool._coverage_diagnostics(
+        observations, requested_frames=120
+    )
+    assert diagnostics == {
+        "requested_frame_count": 120,
+        "coarse_observation_count": 3,
+        "minimum_timestamp_observed": 0,
+        "maximum_timestamp_observed": 2,
+        "zero_count_observations": 2,
+        "positive_count_observations": 1,
+        "uncertain_observations": 1,
+    }
 
 
 def test_refinement_uses_broader_bounded_local_windows(monkeypatch, tmp_path):

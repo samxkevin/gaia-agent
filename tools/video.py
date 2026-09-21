@@ -136,6 +136,8 @@ class AnalyzeYouTubeVideoTool(Tool):
         )
         self.original_question = original_question
         self.last_observations: list[FrameObservation] = []
+        self.observation_parse_diagnostics: dict[str, dict] = {}
+        self.coarse_diagnostics: dict = {}
         self.refinement_diagnostics: list[dict] = []
         self.verification_diagnostics: list[dict] = []
 
@@ -151,8 +153,14 @@ class AnalyzeYouTubeVideoTool(Tool):
                 interval = max(COARSE_INTERVAL_SECONDS if plan.is_numeric_maximum else duration / budget, duration / budget, 0.25)
                 coarse = self._extract_frames(video, root / "coarse", duration, budget, interval=interval)
                 observations = self._observe_frames(coarse, plan, "coarse")
+                self.coarse_diagnostics = {
+                    **self._coverage_diagnostics(
+                        observations, requested_frames=len(coarse)
+                    ),
+                    **self.observation_parse_diagnostics.get("coarse", {}),
+                }
                 if plan.is_numeric_maximum and observations:
-                    candidates = self._select_candidates(observations)
+                    candidates = self._select_candidates(observations, duration)
                     if candidates:
                         try:
                             refined_frames = self._extract_candidate_frames(
@@ -177,7 +185,7 @@ class AnalyzeYouTubeVideoTool(Tool):
                             })
                     try:
                         verification_candidates = self._select_candidates(
-                            self._merge_observations(observations)
+                            self._merge_observations(observations), duration
                         )
                         observations.extend(
                             self._verify_candidates(verification_candidates, plan)
@@ -281,6 +289,8 @@ class AnalyzeYouTubeVideoTool(Tool):
     def _observe_frames(self, frames, plan: VideoCountingPlan, pass_name: str) -> list[FrameObservation]:
         client = self.visual_client_factory()
         observations = []
+        parsed_count = 0
+        placeholder_count = 0
         for start in range(0, len(frames), VISION_BATCH_SIZE):
             batch = frames[start:start + VISION_BATCH_SIZE]
             content = [{"type": "text", "text": f"{plan.instruction}\nReturn ONLY a JSON object with an observations array, one object per image, in the same order. Each observation has timestamp, visible_subjects, species, count, confidence, uncertain, and note. Inspect each image independently. Never merge evidence across images. Use timestamp labels exactly."}]
@@ -290,8 +300,32 @@ class AnalyzeYouTubeVideoTool(Tool):
             response = self._chat_observations(
                 client, messages=[{"role": "user", "content": content}]
             )
-            observations.extend(self._parse_observations(self._response_text(response), batch, pass_name))
-        return observations
+            parsed = self._parse_observations(
+                self._response_text(response), batch, pass_name
+            )
+            parsed_count += len(parsed)
+            observations.extend(parsed)
+            parsed_timestamps = {item.timestamp for item in parsed}
+            for timestamp, path in batch:
+                if float(timestamp) not in parsed_timestamps:
+                    placeholder_count += 1
+                    observations.append(FrameObservation(
+                        float(timestamp),
+                        (),
+                        (),
+                        0,
+                        0.0,
+                        ("provider observation missing",),
+                        "No parseable observation was returned for this extracted frame.",
+                        pass_name,
+                        str(path),
+                    ))
+        self.observation_parse_diagnostics[pass_name] = {
+            "requested_frame_count": len(frames),
+            "parsed_observation_count": parsed_count,
+            "missing_observation_count": placeholder_count,
+        }
+        return sorted(observations, key=lambda item: item.timestamp)
 
     @staticmethod
     def _chat_observations(client, *, messages):
@@ -485,55 +519,109 @@ class AnalyzeYouTubeVideoTool(Tool):
         return verified
 
     @staticmethod
-    def _select_candidates(observations: list[FrameObservation]) -> list[FrameObservation]:
-        """Balance visual score with broad temporal coverage and uncertainty."""
-        eligible = [item for item in observations if item.count > 0 or item.uncertain]
-        if not eligible:
+    def _coverage_diagnostics(
+        observations: list[FrameObservation], requested_frames: int
+    ) -> dict:
+        timestamps = [item.timestamp for item in observations]
+        return {
+            "requested_frame_count": requested_frames,
+            "coarse_observation_count": len(observations),
+            "minimum_timestamp_observed": min(timestamps) if timestamps else None,
+            "maximum_timestamp_observed": max(timestamps) if timestamps else None,
+            "zero_count_observations": sum(item.count == 0 for item in observations),
+            "positive_count_observations": sum(item.count > 0 for item in observations),
+            "uncertain_observations": sum(bool(item.uncertain) for item in observations),
+        }
+
+    @staticmethod
+    def _select_candidates(
+        observations: list[FrameObservation], duration: float | None = None
+    ) -> list[FrameObservation]:
+        """Nominate one deterministic candidate from each full-video region.
+
+        Zero-count observations remain eligible: refinement must not depend on the
+        coarse model already recognizing the maximum. The strongest global frame is
+        preserved because it wins its own region, while the other regions retain
+        independent slots.
+        """
+        if not observations:
             return []
-        ranked = sorted(
-            eligible,
-            key=lambda item: (item.count, item.confidence, len(item.uncertain)),
-            reverse=True,
+        duration = max(
+            float(duration or 0),
+            max(item.timestamp for item in observations),
+            0.001,
         )
+        region_width = duration / REFINE_CANDIDATES
         selected: list[FrameObservation] = []
+        global_ranked = sorted(
+            observations,
+            key=lambda item: (
+                -item.count,
+                -item.confidence,
+                -len(item.uncertain),
+                item.timestamp,
+            ),
+        )
+        # The strongest global candidate is authoritative for score while its
+        # region's slot doubles as the global slot, leaving coverage elsewhere.
+        selected.append(global_ranked[0])
+        global_region = min(
+            int(global_ranked[0].timestamp / region_width),
+            REFINE_CANDIDATES - 1,
+        )
 
-        def add(item):
-            if len(selected) >= REFINE_CANDIDATES:
-                return
-            if all(
-                abs(item.timestamp - other.timestamp)
-                >= CANDIDATE_MIN_SEPARATION_SECONDS
-                for other in selected
-            ):
-                selected.append(item)
-
-        # Preserve the strongest global candidate.
-        add(ranked[0])
-
-        # Reserve opportunities for every major temporal region instead of allowing
-        # tiny score differences to consume all slots in one scene.
-        start = min(item.timestamp for item in eligible)
-        end = max(item.timestamp for item in eligible)
-        width = max((end - start) / REFINE_CANDIDATES, 0.001)
         for region in range(REFINE_CANDIDATES):
-            lower = start + region * width
-            upper = end + 0.001 if region == REFINE_CANDIDATES - 1 else lower + width
-            regional = [item for item in ranked if lower <= item.timestamp < upper]
-            for item in regional:
-                before = len(selected)
-                add(item)
-                if len(selected) > before:
+            if region == global_region:
+                continue
+            if len(selected) >= REFINE_CANDIDATES:
+                break
+            lower = region * region_width
+            upper = duration + 0.001 if region == REFINE_CANDIDATES - 1 else lower + region_width
+            center = (lower + min(upper, duration)) / 2
+            regional = [
+                item for item in observations
+                if lower <= item.timestamp < upper
+            ]
+            ranked = sorted(
+                regional,
+                key=lambda item: (
+                    -item.count,
+                    -item.confidence,
+                    -len(item.uncertain),
+                    abs(item.timestamp - center),
+                    item.timestamp,
+                ),
+            )
+            for item in ranked:
+                if all(
+                    abs(item.timestamp - other.timestamp)
+                    >= CANDIDATE_MIN_SEPARATION_SECONDS
+                    for other in selected
+                ):
+                    selected.append(item)
                     break
 
-        # If regions were sparse, prioritize uncertain/activity-rich observations,
-        # then fill from the global ranking.
-        uncertain = sorted(
-            (item for item in eligible if item.uncertain),
-            key=lambda item: (item.count, 1.0 - item.confidence, len(item.uncertain)),
-            reverse=True,
-        )
-        for item in uncertain + ranked:
-            add(item)
+        # Sparse/missing regions can leave slots open. Fill deterministically while
+        # retaining separation, but never let one region consume another's slot.
+        if len(selected) < REFINE_CANDIDATES:
+            ranked_all = sorted(
+                observations,
+                key=lambda item: (
+                    -item.count,
+                    -item.confidence,
+                    -len(item.uncertain),
+                    item.timestamp,
+                ),
+            )
+            for item in ranked_all:
+                if len(selected) >= REFINE_CANDIDATES:
+                    break
+                if all(
+                    abs(item.timestamp - other.timestamp)
+                    >= CANDIDATE_MIN_SEPARATION_SECONDS
+                    for other in selected
+                ):
+                    selected.append(item)
         return selected
 
     @staticmethod
@@ -636,7 +724,9 @@ class AnalyzeYouTubeVideoTool(Tool):
             for key, value in asdict(item).items()
             if key != "frame_path"
         }
-        candidate_timestamps = [item.timestamp for item in self._select_candidates(coarse)]
+        candidate_timestamps = [
+            item.timestamp for item in self._select_candidates(coarse, duration)
+        ]
         evidence = {
             "question_semantics": plan.entity,
             "duration_seconds": duration,
@@ -657,6 +747,9 @@ class AnalyzeYouTubeVideoTool(Tool):
                 "exhaustive": False,
                 "kind": "sampled",
             },
+            "coarse_diagnostics": self.coarse_diagnostics or self._coverage_diagnostics(
+                coarse, requested_frames=coarse_count
+            ),
             "candidate_timestamps": candidate_timestamps,
             "refinement_diagnostics": self.refinement_diagnostics,
             "refined_observations": [public(item) for item in refined],
