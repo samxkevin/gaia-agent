@@ -9,6 +9,24 @@ from config import GAIA_API_URL, HF_TOKEN
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "gaia-agent/1.0"})
 
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# GAIA’s hosted endpoint has occasionally returned transient TLS EOF errors.
+# Retry only idempotent GETs, including status 5xx and throttling responses.
+_GET_RETRY = Retry(
+    total=3,
+    connect=3,
+    read=3,
+    status=3,
+    backoff_factor=0.75,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset({"GET"}),
+    respect_retry_after_header=True,
+)
+SESSION.mount("https://", HTTPAdapter(max_retries=_GET_RETRY))
+SESSION.mount("http://", HTTPAdapter(max_retries=_GET_RETRY))
+
 
 def fetch_questions():
     response = SESSION.get(f"{GAIA_API_URL}/questions", timeout=30)
