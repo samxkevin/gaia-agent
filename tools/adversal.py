@@ -74,13 +74,26 @@ def parse_request_id(text: str) -> str | None:
 
 
 def parse_remaining_minutes(text: str) -> float | None:
-    match = _MINUTES.search(text or "")
-    if not match:
-        return None
-    try:
-        return float(match.group(1))
-    except ValueError:
-        return None
+    value = text or ""
+    patterns = (
+        r"(?:remaining|left|available)[^\\d]{0,48}([\\d.]+)\\s*minutes?",
+        r"([\\d.]+)\\s*minutes?[^\\d]{0,24}(?:remaining|left|available)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, value, re.I)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+
+    matches = _MINUTES.findall(value)
+    if len(matches) == 1:
+        try:
+            return float(matches[0])
+        except ValueError:
+            return None
+    return None
 
 
 def parse_time_value(value: Any) -> float | None:
