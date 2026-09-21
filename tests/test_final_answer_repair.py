@@ -101,6 +101,7 @@ def test_no_final_answer_call_does_not_trigger_repair():
 
 def test_invalid_repair_preserves_original_without_fabricating_answer():
     original = message({})
+    # Plain text is not accepted as a repaired tool call.
     invalid = message(content="3", calls=False)
     result, delegate, _ = repair(original, invalid)
     assert result is original

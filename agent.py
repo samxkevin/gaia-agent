@@ -87,7 +87,7 @@ def create_agent(question: str | None = None):
             ReadFileTool(),
             InspectFileTool(),
             AnalyzeImageTool(),
-            AnalyzeYouTubeVideoTool(),
+            AnalyzeYouTubeVideoTool(original_question=question),
             TranscribeAudioTool(),
             ExtractYouTubeIdTool(),
             YouTubeTranscriptTool(),

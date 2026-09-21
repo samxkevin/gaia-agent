@@ -18,7 +18,6 @@ def javascript_runtime_status():
     return {"name": name, "path": path}, None
 
 
-
 def main():
     missing = []
 
@@ -118,6 +117,9 @@ def main():
                 )
                 route_errors.append(message)
                 print(f"  FAIL: {message}")
+
+    for route in routes:
+        print(f"  {route.key_slot} -> {route.model_id}")
 
     if missing or route_errors:
         problems = missing + [f"route probe failed: {error}" for error in route_errors]

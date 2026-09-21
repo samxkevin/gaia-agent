@@ -21,15 +21,14 @@ COHERE_FALLBACK_MODEL = os.getenv(
     "COHERE_FALLBACK_MODEL",
     "command-a-reasoning-08-2025",
 )
+COHERE_VISION_MODEL = os.getenv(
+    "COHERE_VISION_MODEL",
+    "command-a-vision-07-2025",
+)
 
 COHERE_BASE_URL = os.getenv(
     "COHERE_BASE_URL",
     "https://api.cohere.ai/compatibility/v1",
-)
-
-COHERE_VIDEO_MODEL = os.getenv(
-    "COHERE_VIDEO_MODEL",
-    "command-a-vision-07-2025",
 )
 
 COHERE_PRIMARY_TRANSCRIPTION_MODEL = os.getenv(

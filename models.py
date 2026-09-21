@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -17,6 +16,7 @@ from config import (
     COHERE_PRIMARY_API_KEY,
     COHERE_PRIMARY_MODEL,
     COHERE_PRIMARY_TRANSCRIPTION_MODEL,
+    COHERE_VISION_MODEL,
     FAILOVER_ATTEMPTS,
     FAILOVER_COOLDOWN_SECONDS,
     MODEL_MAX_RETRIES,
@@ -63,26 +63,33 @@ def get_chat_routes() -> list[Route]:
     return routes
 
 
-def get_vision_routes(model_id: str | None = None) -> list[Route]:
-    """Return routes for a vision capable Cohere model."""
-    if model_id is None:
-        model_id = COHERE_PRIMARY_MODEL
-    key_pairs = [
-        ("primary_key", COHERE_PRIMARY_API_KEY),
-        ("fallback_key", COHERE_FALLBACK_API_KEY),
-    ]
+def get_vision_routes() -> list[Route]:
+    """Build dedicated multimodal routes without text-only reasoning models."""
     routes = [
-        Route(
-            key_slot=key_slot,
-            model_id=model_id,
-            api_key=api_key,
+        Route(key_slot, COHERE_VISION_MODEL, api_key)
+        for key_slot, api_key in (
+            ("primary_key", COHERE_PRIMARY_API_KEY),
+            ("fallback_key", COHERE_FALLBACK_API_KEY),
         )
-        for key_slot, api_key in key_pairs
-        if api_key
+        if api_key and COHERE_VISION_MODEL
     ]
     if not routes:
-        raise RuntimeError("No vision capable Cohere route is configured.")
+        raise RuntimeError("No vision-capable Cohere route is configured.")
     return routes
+
+
+def get_verification_routes() -> list[Route]:
+    """Use Command A+ for independent image verification, never text-only models."""
+    routes = [
+        route
+        for route in get_chat_routes()
+        if "command-a-plus" in route.model_id.lower()
+    ]
+    if not routes:
+        raise RuntimeError("No Command A+ multimodal verification route is configured.")
+    return routes
+
+
 def get_transcription_routes() -> list[Route]:
     key_pairs = [
         ("primary_key", COHERE_PRIMARY_API_KEY),
@@ -307,7 +314,14 @@ class FailoverModel(Model):
         response_format,
         kwargs,
     ):
-        """Repair Cohere compatibility responses that omit final_answer.answer."""
+        """Repair Cohere compatibility responses that omit final_answer.answer.
+
+        Command A can select the correct final tool while serializing its arguments
+        as ``{}``.  Letting that reach ToolCallingAgent turns a completed task into
+        a tool error and another research step.  Re-ask the same model to serialize
+        only the already-derived answer, exposing only the final tool.  This stays
+        at the model boundary, where malformed compatibility responses belong.
+        """
         if final_answer_tool is None or not self._has_malformed_final_answer(result):
             return result
 
@@ -338,11 +352,16 @@ class FailoverModel(Model):
                 **kwargs,
             )
         except Exception:
+            # The original generation succeeded. A best-effort serialization
+            # repair must not turn that route success into a failover event.
             return result
 
+        # Never replace the original malformed call with another malformed call;
+        # the normal agent error remains visible if the provider cannot repair it.
         if not self._has_valid_final_answer(repaired):
             return result
         return repaired
+
     @staticmethod
     def _reasoning_effort(model_id: str) -> str:
         model_name = model_id.lower()
@@ -397,8 +416,10 @@ class FailoverModel(Model):
 class CohereFailoverClient:
     """Direct Cohere client used by multimodal tools."""
 
-    def __init__(self, model_id: str | None = None):
-        self.routes = get_vision_routes(model_id)
+    def __init__(self):
+        # Multimodal requests must never fail over to text-only reasoning models.
+        # Text-agent FailoverModel continues to use all four normal routes.
+        self.routes = get_vision_routes()
         self.last_route: Route | None = None
         self.failover_count = 0
         self._cooldowns: dict[tuple[str, str], float] = {}
@@ -476,3 +497,23 @@ class CohereFailoverClient:
         raise RuntimeError(
             "All Cohere transcription routes failed. " + " | ".join(errors)
         )
+
+
+class CohereTextFailoverClient(CohereFailoverClient):
+    """Direct text client retaining the normal four model/key routes."""
+
+    def __init__(self):
+        self.routes = get_chat_routes()
+        self.last_route: Route | None = None
+        self.failover_count = 0
+        self._cooldowns: dict[tuple[str, str], float] = {}
+
+
+class CohereVerificationClient(CohereFailoverClient):
+    """Independent multimodal client backed only by Command A+ routes."""
+
+    def __init__(self):
+        self.routes = get_verification_routes()
+        self.last_route: Route | None = None
+        self.failover_count = 0
+        self._cooldowns: dict[tuple[str, str], float] = {}

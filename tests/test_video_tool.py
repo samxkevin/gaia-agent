@@ -1,9 +1,14 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from PIL import Image
 
 from tools.video import (
     AnalyzeYouTubeVideoTool,
+    FrameObservation,
+    VISION_BATCH_SIZE,
+    build_video_counting_plan,
     find_javascript_runtime,
     normalize_youtube_url,
 )
@@ -11,184 +16,304 @@ from tools.vision import ExtractYouTubeIdTool
 
 
 def response(text):
-    return SimpleNamespace(
-        message=SimpleNamespace(content=[SimpleNamespace(text=text)])
-    )
+    return SimpleNamespace(message=SimpleNamespace(content=[SimpleNamespace(text=text)]))
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, replies):
+        self.replies = iter(replies)
         self.calls = []
 
     def chat(self, **kwargs):
         self.calls.append(kwargs)
-        return (
-            response("timestamped visual evidence")
-            if len(self.calls) == 1
-            else response("aggregated answer")
-        )
+        reply = next(self.replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return response(reply)
 
 
-def test_markdown_youtube_url_is_normalized_and_id_extracted():
-    markdown = "[watch this](https://www.youtube.com/watch?v=L1vXCYZAYYM)"
-    assert (
-        normalize_youtube_url(markdown)
-        == "https://www.youtube.com/watch?v=L1vXCYZAYYM"
-    )
-    assert ExtractYouTubeIdTool().forward(markdown) == "L1vXCYZAYYM"
+def observation_json(timestamps, counts=None):
+    counts = counts or [1] * len(timestamps)
+    return json.dumps([{"timestamp": t, "visible_subjects": ["birds"], "species": [f"species-{i}" for i in range(count)], "count": count, "confidence": .9, "uncertain": [], "note": "same frame"} for t, count in zip(timestamps, counts)])
 
 
-def test_frame_analysis_preserves_timestamps_and_uses_same_frame_instruction(
-    tmp_path,
-):
-    frames = []
-    for index in range(2):
+def make_frames(tmp_path, timestamps):
+    result = []
+    for index, timestamp in enumerate(timestamps):
         path = tmp_path / f"{index}.jpg"
-        Image.new("RGB", (8, 8), color=(index * 10, 0, 0)).save(path)
-        frames.append((index * 2.5, path))
-    client = FakeClient()
-    tool = AnalyzeYouTubeVideoTool(visual_client_factory=lambda: client)
+        Image.new("RGB", (16, 16)).save(path)
+        result.append((timestamp, path))
+    return result
 
-    result = tool._analyze_frames(
-        frames,
-        "How many kinds are simultaneous?",
-        5.0,
+
+def test_semantics_preserve_species_vs_individuals():
+    for question in ("highest number of bird species to be on camera simultaneously", "maximum number of distinct species visible together", "how many bird species appear at once"):
+        plan = build_video_counting_plan(question)
+        assert plan.distinct_categories and plan.simultaneous
+        assert question in plan.instruction
+    assert not build_video_counting_plan("maximum number of birds visible at once").distinct_categories
+
+
+def test_markdown_url_normalization():
+    url = "[watch](https://www.youtube.com/watch?v=L1vXCYZAYYM)"
+    assert normalize_youtube_url(url).endswith("L1vXCYZAYYM")
+    assert ExtractYouTubeIdTool().forward(url) == "L1vXCYZAYYM"
+
+
+def test_structured_observations_preserve_timestamp_and_same_frame_prompt(tmp_path):
+    frames = make_frames(tmp_path, [1.25, 2.25])
+    # Model-returned timestamps are deliberately wrong; extracted timestamps win.
+    visual = FakeClient([observation_json([91.5, 92.5], [2, 3])])
+    tool = AnalyzeYouTubeVideoTool(lambda: visual)
+    observations = tool._observe_frames(frames, build_video_counting_plan("maximum bird species visible at once"), "coarse")
+    assert [o.timestamp for o in observations] == [1.25, 2.25]
+    assert [o.count for o in observations] == [2, 3]
+    prompt = visual.calls[0]["messages"][0]["content"][0]["text"]
+    assert "Never merge evidence across images" in prompt
+    assert len(frames) <= VISION_BATCH_SIZE
+
+
+def test_independent_verifier_receives_actual_frame_without_prior_claims(tmp_path):
+    frame = make_frames(tmp_path, [82.125])[0][1]
+    # Independent verifier hallucinates a different timestamp; frame identity wins.
+    verifier = FakeClient([observation_json([91.500], [2])])
+    tool = AnalyzeYouTubeVideoTool(
+        lambda: FakeClient([]),
+        verification_client_factory=lambda: verifier,
     )
+    candidate = FrameObservation(
+        82.125, (), ("prior-secret-species",), 1, .7, (),
+        pass_name="refined", frame_path=str(frame),
+    )
+    result = tool._verify_candidates(
+        [candidate],
+        build_video_counting_plan("maximum bird species visible at once"),
+    )
+    assert result[0].pass_name == "verification"
+    assert result[0].timestamp == 82.125
+    content = verifier.calls[0]["messages"][0]["content"]
+    assert content[1]["type"] == "image_url"
+    assert "Original question: maximum bird species visible at once" in content[0]["text"]
+    assert "prior-secret-species" not in content[0]["text"]
 
-    assert result == "aggregated answer"
-    assert len(client.calls) == 2
-    frame_content = client.calls[0]["messages"][0]["content"]
-    texts = [part["text"] for part in frame_content if part["type"] == "text"]
-    assert any("0.00 seconds" in text for text in texts)
-    assert any("2.50 seconds" in text for text in texts)
-    assert any("do not combine frames" in text for text in texts)
-    synthesis = client.calls[1]["messages"][0]["content"]
-    assert "never merge objects seen at different timestamps" in synthesis
+
+def test_verification_is_bounded_to_candidate_limit(tmp_path):
+    frames = make_frames(tmp_path, list(range(6)))
+    verifier = FakeClient([observation_json([float(i)], [1]) for i in range(4)])
+    tool = AnalyzeYouTubeVideoTool(
+        lambda: FakeClient([]), verification_client_factory=lambda: verifier
+    )
+    candidates = [
+        FrameObservation(float(i), (), ("a",), 1, .8, (), frame_path=str(path))
+        for i, (_, path) in enumerate(frames)
+    ]
+    assert len(tool._verify_candidates(candidates, build_video_counting_plan("maximum species visible at once"))) == 4
+    assert len(verifier.calls) == 4
 
 
-def test_download_passes_bundled_ffmpeg_and_available_js_runtime(
-    monkeypatch,
-    tmp_path,
-):
-    tool = AnalyzeYouTubeVideoTool()
+def test_candidate_selection_finds_high_counts_and_separates_regions():
+    observations = [FrameObservation(t, (), ("a",) * c, c, .9, ()) for t, c in [(1, 1), (2, 3), (2.5, 3), (8, 2)]]
+    selected = AnalyzeYouTubeVideoTool._select_candidates(observations)
+    assert selected[0].timestamp == 2
+    assert 2.5 not in [x.timestamp for x in selected]
+
+
+def test_single_injected_factory_controls_visual_and_synthesis(tmp_path):
+    frames = make_frames(tmp_path, [1.0])
+    injected = FakeClient([observation_json([1.0], [1]), "summary"])
+    tool = AnalyzeYouTubeVideoTool(lambda: injected)
+    plan = build_video_counting_plan("maximum species visible at once")
+    observations = tool._observe_frames(frames, plan, "coarse")
+    assert "summary" in tool._synthesize(observations, plan, 2, 1)
+    assert len(injected.calls) == 2
+
+
+def test_synthesis_uses_injected_client_and_never_merges_timestamps():
+    synthesis = FakeClient(["aggregated answer"])
+    tool = AnalyzeYouTubeVideoTool(lambda: FakeClient([]), lambda: synthesis)
+    observations = [FrameObservation(1, (), ("a", "b"), 2, .9, ()), FrameObservation(2, (), ("b", "c"), 2, .9, ())]
+    result = tool._synthesize(observations, build_video_counting_plan("maximum species visible at once"), 3, 3)
+    assert "aggregated answer" in result
+    payload = synthesis.calls[0]["messages"][0]["content"]
+    assert "Do not add species from different timestamps" in payload
+    assert '"programmatic_maximum_observed": 2' in payload
+
+
+def test_merge_keeps_stronger_coarse_when_refinement_is_lower():
+    coarse = FrameObservation(10.0, (), ("a", "b", "c"), 3, .9, (), pass_name="coarse")
+    refined = FrameObservation(10.05, (), ("a", "b"), 2, .95, (), pass_name="refined")
+    assert AnalyzeYouTubeVideoTool._merge_observations([coarse, refined]) == [coarse]
+
+
+def test_merge_prefers_stronger_refinement_and_deduplicates_overlap():
+    coarse = FrameObservation(10.0, (), ("a",), 1, .7, (), pass_name="coarse")
+    refined = FrameObservation(10.05, (), ("a", "b"), 2, .95, (), pass_name="refined")
+    other = FrameObservation(12.0, (), ("c",), 1, .8, (), pass_name="coarse")
+    merged = AnalyzeYouTubeVideoTool._merge_observations([coarse, refined, other])
+    assert merged == [refined, other]
+
+
+def test_matching_verification_preserves_high_confidence_candidate():
+    coarse = FrameObservation(10, (), ("a", "b", "c"), 3, .9, (), pass_name="coarse")
+    refined = FrameObservation(10.05, (), ("a", "b"), 2, .6, (), pass_name="refined")
+    verified = FrameObservation(10.02, (), ("a", "b", "c"), 3, .95, (), pass_name="verification")
+    assert AnalyzeYouTubeVideoTool._reconcile_observations([coarse, refined, verified]) == [verified]
+
+
+def test_weak_contradictory_verification_does_not_erase_stronger_evidence():
+    coarse = FrameObservation(10, (), ("a", "b", "c"), 3, .95, (), pass_name="coarse")
+    verified = FrameObservation(10.02, (), ("a", "b"), 2, .4, (), pass_name="verification")
+    assert AnalyzeYouTubeVideoTool._reconcile_observations([coarse, verified]) == [coarse]
+
+
+def test_strong_consensus_can_reduce_low_confidence_candidate():
+    coarse = FrameObservation(10, (), ("a", "b", "c"), 3, .35, (), pass_name="coarse")
+    refined = FrameObservation(10.04, (), ("a", "b"), 2, .9, (), pass_name="refined")
+    verified = FrameObservation(10.02, (), ("a", "b"), 2, .95, (), pass_name="verification")
+    assert AnalyzeYouTubeVideoTool._reconcile_observations([coarse, refined, verified]) == [verified]
+
+
+def test_reconciliation_timestamp_grouping_is_nontransitive():
+    first = FrameObservation(10.000, (), ("a",), 1, .9, (), pass_name="coarse")
+    bridge = FrameObservation(10.100, (), ("a",), 1, .8, (), pass_name="refined")
+    third = FrameObservation(10.200, (), ("b",), 1, .9, (), pass_name="verification")
+    reconciled = AnalyzeYouTubeVideoTool._reconcile_observations(
+        [first, bridge, third], timestamp_tolerance=.125
+    )
+    assert reconciled == [first, third]
+
+
+def test_reconciliation_never_merges_different_timestamps():
+    first = FrameObservation(10, (), ("a", "b"), 2, .9, (), pass_name="coarse")
+    second = FrameObservation(10.25, (), ("c",), 1, .9, (), pass_name="verification")
+    assert AnalyzeYouTubeVideoTool._reconcile_observations([first, second]) == [first, second]
+
+
+def test_programmatic_maximum_is_recomputed_from_merged_evidence():
+    synthesis = FakeClient(["normalized"])
+    tool = AnalyzeYouTubeVideoTool(lambda: FakeClient([]), lambda: synthesis)
+    observations = [
+        FrameObservation(1, (), ("a", "b", "c"), 3, .95, (), pass_name="coarse"),
+        FrameObservation(1.05, (), ("a", "b"), 2, .9, (), pass_name="refined"),
+        FrameObservation(4, (), ("d", "e"), 2, .8, (), pass_name="refined"),
+    ]
+    result = tool._synthesize(observations, build_video_counting_plan("maximum species visible at once"), 5, 5)
+    assert '"programmatic_maximum_observed": 3' in result
+    assert '"timestamp": 1' in result
+    assert '"species": [\n        "a",\n        "b",\n        "c"' in result
+
+
+def test_secondary_synthesis_failure_preserves_primary_result():
+    synthesis = FakeClient([RuntimeError("down")])
+    tool = AnalyzeYouTubeVideoTool(lambda: FakeClient([]), lambda: synthesis)
+    obs = [FrameObservation(1, (), ("a", "b"), 2, .9, ())]
+    assert '"programmatic_maximum_observed": 2' in tool._synthesize(obs, build_video_counting_plan("maximum species visible at once"), 2, 2)
+
+
+def test_download_uses_720p_bundled_ffmpeg_and_js(monkeypatch, tmp_path):
     commands = []
-
     def run(command, **kwargs):
-        commands.append(command)
-        (tmp_path / "video.mp4").write_bytes(b"video")
-
-    monkeypatch.setattr(
-        "tools.video.find_javascript_runtime",
-        lambda: ("node", "/usr/bin/node"),
-    )
-    monkeypatch.setattr(
-        "imageio_ffmpeg.get_ffmpeg_exe",
-        lambda: "/bundled/ffmpeg",
-    )
+        commands.append(command); (tmp_path / "video.mp4").write_bytes(b"x")
+    monkeypatch.setattr("tools.video.find_javascript_runtime", lambda: ("node", "/node"))
+    monkeypatch.setattr("imageio_ffmpeg.get_ffmpeg_exe", lambda: "/ffmpeg")
     monkeypatch.setattr("tools.video.subprocess.run", run)
-
-    assert (
-        tool._download("https://youtu.be/abcdefghi", tmp_path).name
-        == "video.mp4"
-    )
+    AnalyzeYouTubeVideoTool()._download("https://youtu.be/abcdef", tmp_path)
     command = commands[0]
-    assert command[command.index("--ffmpeg-location") + 1] == "/bundled/ffmpeg"
-    assert command[command.index("--js-runtimes") + 1] == "node:/usr/bin/node"
+    assert command[command.index("--ffmpeg-location") + 1] == "/ffmpeg"
+    assert command[command.index("--js-runtimes") + 1] == "node:/node"
+    assert "height<=720" in command[command.index("-f") + 1]
 
 
-def test_dense_temporal_sampling_uses_full_budget(monkeypatch, tmp_path):
-    tool = AnalyzeYouTubeVideoTool()
-    video = tmp_path / "video.mp4"
-    video.write_bytes(b"video")
-    commands = []
+def test_temporal_questions_are_denser_and_refinement_is_conditional(monkeypatch, tmp_path):
+    video = tmp_path / "v.mp4"; video.write_bytes(b"x")
+    frame = tmp_path / "f.jpg"; frame.write_bytes(b"x")
+    calls = []
+    tool = AnalyzeYouTubeVideoTool(original_question="maximum number of species visible at once")
+    monkeypatch.setattr(tool, "_download", lambda *a: video)
+    monkeypatch.setattr(tool, "_duration", lambda p: 100.0)
+    monkeypatch.setattr(tool, "_extract_frames", lambda *a, **kw: calls.append(kw.get("interval")) or [(5, frame)])
+    monkeypatch.setattr(tool, "_observe_frames", lambda frames, plan, name: [FrameObservation(5, (), ("a",), 1, .9, (), pass_name=name)])
+    monkeypatch.setattr(tool, "_extract_candidate_frames", lambda *a: [(5.1, frame)])
+    monkeypatch.setattr(tool, "_synthesize", lambda *a: "ok")
+    assert tool.forward("https://youtu.be/abcdef", "narrow paraphrase") == "ok"
+    assert calls[0] == 1.0
 
-    def run(command, **kwargs):
-        commands.append(command)
-
-    monkeypatch.setattr(
-        "imageio_ffmpeg.get_ffmpeg_exe",
-        lambda: "/bundled/ffmpeg",
-    )
-    monkeypatch.setattr("tools.video.subprocess.run", run)
-    tool._extract_frames(
-        video,
-        tmp_path / "frames",
-        duration=30.0,
-        max_frames=60,
-    )
-
-    command = commands[0]
-    assert "fps=1/0.5" in command[command.index("-vf") + 1]
-    assert command[command.index("-frames:v") + 1] == "60"
+    ordinary = AnalyzeYouTubeVideoTool(original_question="what color is the bird?")
+    monkeypatch.setattr(ordinary, "_download", lambda *a: video)
+    monkeypatch.setattr(ordinary, "_duration", lambda p: 100.0)
+    monkeypatch.setattr(ordinary, "_extract_frames", lambda *a, **kw: [(5, frame)])
+    monkeypatch.setattr(ordinary, "_observe_frames", lambda frames, plan, name: [])
+    monkeypatch.setattr(ordinary, "_extract_candidate_frames", lambda *a: (_ for _ in ()).throw(AssertionError("unexpected refinement")))
+    monkeypatch.setattr(ordinary, "_synthesize", lambda *a: "ok")
+    assert ordinary.forward("https://youtu.be/abcdef", "paraphrase") == "ok"
 
 
-def test_javascript_runtime_detection_accepts_node_environment():
-    paths = {"node": "/usr/local/bin/node"}
-    assert find_javascript_runtime(paths.get) == (
-        "node",
-        "/usr/local/bin/node",
-    )
-
-
-def test_forward_composes_download_sampling_and_visual_analysis(
-    monkeypatch,
-    tmp_path,
-):
-    tool = AnalyzeYouTubeVideoTool()
-    video = tmp_path / "video.mp4"
-    video.write_bytes(b"video")
-    frame = tmp_path / "frame.jpg"
-    frame.write_bytes(b"frame")
-    seen = {}
-
-    def fake_download(url, workdir):
-        seen["url"] = url
-        return video
-
-    monkeypatch.setattr(tool, "_download", fake_download)
+def test_refinement_failure_preserves_complete_coarse_result(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"; video.write_bytes(b"video")
+    frame = tmp_path / "frame.jpg"; frame.write_bytes(b"frame")
+    coarse = FrameObservation(5, (), ("a", "b"), 2, .9, (), pass_name="coarse")
+    captured = {}
+    tool = AnalyzeYouTubeVideoTool(original_question="maximum species visible at once")
+    monkeypatch.setattr(tool, "_download", lambda *args: video)
     monkeypatch.setattr(tool, "_duration", lambda path: 10.0)
-    monkeypatch.setattr(tool, "_extract_frames", lambda *args: [(1.0, frame)])
+    monkeypatch.setattr(tool, "_extract_frames", lambda *args, **kwargs: [(5, frame)])
+    monkeypatch.setattr(tool, "_observe_frames", lambda frames, plan, name: [coarse])
+    monkeypatch.setattr(tool, "_extract_candidate_frames", lambda *args: (_ for _ in ()).throw(RuntimeError("refinement failed")))
+    monkeypatch.setattr(tool, "_synthesize", lambda observations, *args: captured.update(observations=observations) or "ok")
+    assert tool.forward("https://youtu.be/abcdef", "ignored") == "ok"
+    assert captured["observations"] == [coarse]
+
+
+def test_verification_failure_does_not_fail_task_or_erase_evidence(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"; video.write_bytes(b"video")
+    frame = tmp_path / "frame.jpg"; frame.write_bytes(b"frame")
+    coarse = FrameObservation(
+        5, (), ("a", "b"), 2, .9, (),
+        pass_name="coarse", frame_path=str(frame),
+    )
+    verifier = FakeClient([RuntimeError("verification unavailable")])
+    captured = {}
+    tool = AnalyzeYouTubeVideoTool(
+        lambda: FakeClient([]),
+        verification_client_factory=lambda: verifier,
+        original_question="maximum species visible at once",
+    )
+    monkeypatch.setattr(tool, "_download", lambda *args: video)
+    monkeypatch.setattr(tool, "_duration", lambda path: 10.0)
+    monkeypatch.setattr(tool, "_extract_frames", lambda *args, **kwargs: [(5, frame)])
     monkeypatch.setattr(
-        tool,
-        "_analyze_frames",
-        lambda frames, question, duration: (
-            f"{question}:{duration}:{len(frames)}"
-        ),
+        tool, "_observe_frames", lambda frames, plan, name: [coarse] if name == "coarse" else []
     )
+    monkeypatch.setattr(tool, "_extract_candidate_frames", lambda *args: [])
+    monkeypatch.setattr(tool, "_synthesize", lambda observations, *args: captured.update(observations=observations) or "ok")
+    assert tool.forward("https://youtu.be/abcdef", "ignored") == "ok"
+    assert captured["observations"] == [coarse]
+    assert len(verifier.calls) == 1
 
-    result = tool.forward(
-        "[video](https://youtu.be/abcdefghi)",
-        "visible question",
-        12,
+
+def test_frame_extraction_prefers_ffmpeg_reported_timestamps(monkeypatch, tmp_path):
+    output = tmp_path / "frames"
+    output.mkdir()
+    for name in ("0001.jpg", "0002.jpg"):
+        (output / name).write_bytes(b"frame")
+    monkeypatch.setattr("imageio_ffmpeg.get_ffmpeg_exe", lambda: "/ffmpeg")
+    completed = SimpleNamespace(stderr=b"showinfo pts_time:0.125 x\nshowinfo pts_time:1.125 x")
+    monkeypatch.setattr("tools.video.subprocess.run", lambda *args, **kwargs: completed)
+    frames = AnalyzeYouTubeVideoTool()._extract_frames(
+        tmp_path / "video", output, 10, 2, interval=1, offset=2
     )
+    assert [timestamp for timestamp, _ in frames] == [2.125, 3.125]
 
-    assert seen["url"] == "https://youtu.be/abcdefghi"
-    assert result == "visible question:10.0:1"
-def test_temporal_count_overrides_sparse_model_request():
-    tool = AnalyzeYouTubeVideoTool()
 
-    assert tool._needs_dense_temporal_sampling(
-        "What is the highest number of bird species on camera simultaneously?"
-    )
-    assert not tool._needs_dense_temporal_sampling(
-        "What color is the bird?"
-    )
+def test_frame_extraction_is_resource_bounded(monkeypatch, tmp_path):
+    commands = []
+    monkeypatch.setattr("imageio_ffmpeg.get_ffmpeg_exe", lambda: "/ffmpeg")
+    monkeypatch.setattr("tools.video.subprocess.run", lambda command, **kwargs: commands.append(command))
+    AnalyzeYouTubeVideoTool()._extract_frames(tmp_path / "v", tmp_path / "frames", 30, 30, interval=1)
+    command = commands[0]
+    assert "min(1280,iw)" in command[command.index("-vf") + 1]
+    assert command[command.index("-frames:v") + 1] == "30"
 
-def test_video_tool_uses_configured_vision_factory_by_default(monkeypatch):
-    import tools.video as video_module
 
-    seen = {}
-
-    class FakeClient:
-        pass
-
-    def factory(*, model_id=None):
-        seen["model_id"] = model_id
-        return FakeClient()
-
-    monkeypatch.setattr(video_module, "CohereFailoverClient", factory)
-    tool = video_module.AnalyzeYouTubeVideoTool()
-    client = tool.visual_client_factory()
-
-    assert isinstance(client, FakeClient)
-    assert seen["model_id"] == video_module.COHERE_VIDEO_MODEL
+def test_javascript_runtime_accepts_node():
+    assert find_javascript_runtime({"node": "/node"}.get) == ("node", "/node")

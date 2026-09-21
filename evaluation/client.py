@@ -70,6 +70,7 @@ def _official_gaia_file(task_id: str) -> Path:
             raise RuntimeError(f"Task {task_id} has no attachment path in official GAIA metadata.")
         if Path(dataset_path).is_absolute() or ".." in Path(dataset_path).parts:
             raise RuntimeError(f"Task {task_id} has an unsafe attachment path in GAIA metadata.")
+        # file_path is authoritative; file_name is only display metadata.
         return Path(hf_hub_download(filename=str(dataset_path), **options))
     except Exception as exc:
         raise RuntimeError(
