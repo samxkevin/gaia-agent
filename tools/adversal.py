@@ -19,7 +19,6 @@ from config import (
     ADVERSAL_TIMEOUT_SECONDS,
     ADVERSAL_POLL_SECONDS,
 )
-from models import CohereFailoverClient
 from tools.video import (
     AnalyzeYouTubeVideoTool as NativeAnalyzeYouTubeVideoTool,
     FrameObservation,
@@ -77,8 +76,8 @@ def parse_request_id(text: str) -> str | None:
 def parse_remaining_minutes(text: str) -> float | None:
     value = text or ""
     patterns = (
-        r"(?:remaining|left|available)[^\\d]{0,48}([\\d.]+)\\s*minutes?",
-        r"([\\d.]+)\\s*minutes?[^\\d]{0,24}(?:remaining|left|available)",
+        r"(?:remaining|left|available)\D{0,48}([\d.]+)\s*minutes?",
+        r"([\d.]+)\s*minutes?\D{0,24}(?:remaining|left|available)",
     )
     for pattern in patterns:
         match = re.search(pattern, value, re.I)
@@ -354,9 +353,6 @@ async def _run_adversal_async(
                     {
                         "video_url": source_url,
                         "output_path": str(output_dir),
-                        "file_name": "notes.md",
-                        "type": "generic",
-                        "images": "minimal",
                     },
                 )
                 request_id = parse_request_id(process_text)
