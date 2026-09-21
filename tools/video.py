@@ -22,8 +22,7 @@ from models import (
 COARSE_MAX_FRAMES = 120
 COARSE_INTERVAL_SECONDS = 1.0
 REFINE_CANDIDATES = 4
-REFINE_RADIUS_SECONDS = 6.0
-REFINE_FPS = 2
+REFINE_REGION_INTERVAL_SECONDS = 1.0
 CANDIDATE_MIN_SEPARATION_SECONDS = 5.0
 VERIFICATION_LIMIT = 4
 VISION_BATCH_SIZE = 4
@@ -137,6 +136,7 @@ class AnalyzeYouTubeVideoTool(Tool):
         self.original_question = original_question
         self.last_observations: list[FrameObservation] = []
         self.observation_parse_diagnostics: dict[str, dict] = {}
+        self.observation_batch_diagnostics: dict[str, list[dict]] = {}
         self.coarse_diagnostics: dict = {}
         self.refinement_diagnostics: list[dict] = []
         self.verification_diagnostics: list[dict] = []
@@ -240,21 +240,30 @@ class AnalyzeYouTubeVideoTool(Tool):
         return list(zip(timestamps, paths))
 
     def _extract_candidate_frames(self, video: Path, output_dir: Path, duration: float, candidates: list[FrameObservation]):
+        """Refine complete temporal regions at a bounded one-frame/second rate."""
         frames = []
         seen = set()
+        seen_regions = set()
         self.refinement_diagnostics = []
+        region_width = duration / REFINE_CANDIDATES
         for candidate_index, candidate in enumerate(candidates[:REFINE_CANDIDATES]):
-            start = max(0.0, candidate.timestamp - REFINE_RADIUS_SECONDS)
-            end = min(duration, candidate.timestamp + REFINE_RADIUS_SECONDS)
-            count = min(
-                int((end - start) * REFINE_FPS) + 1,
-                int(REFINE_RADIUS_SECONDS * 2 * REFINE_FPS) + 1,
+            region = min(
+                int(candidate.timestamp / region_width),
+                REFINE_CANDIDATES - 1,
             )
+            if region in seen_regions:
+                continue
+            seen_regions.add(region)
+            start = region * region_width
+            end = duration if region == REFINE_CANDIDATES - 1 else (region + 1) * region_width
+            count = int((end - start) / REFINE_REGION_INTERVAL_SECONDS) + 1
             diagnostic = {
                 "attempted": True,
+                "region_index": region,
                 "candidate_timestamp": candidate.timestamp,
                 "start": start,
                 "end": end,
+                "interval_seconds": REFINE_REGION_INTERVAL_SECONDS,
                 "extracted_frame_count": 0,
                 "status": "pending",
                 "exception_type": None,
@@ -267,7 +276,7 @@ class AnalyzeYouTubeVideoTool(Tool):
                     output_dir / str(candidate_index),
                     duration,
                     count,
-                    interval=1 / REFINE_FPS,
+                    interval=REFINE_REGION_INTERVAL_SECONDS,
                     offset=start,
                 )
                 diagnostic["extracted_frame_count"] = len(batch)
@@ -291,18 +300,55 @@ class AnalyzeYouTubeVideoTool(Tool):
         observations = []
         parsed_count = 0
         placeholder_count = 0
+        batch_diagnostics = []
         for start in range(0, len(frames), VISION_BATCH_SIZE):
             batch = frames[start:start + VISION_BATCH_SIZE]
+            diagnostic = {
+                "batch_index": start // VISION_BATCH_SIZE,
+                "requested_observations": len(batch),
+                "returned_observations": 0,
+                "status": "pending",
+                "exception_type": None,
+                "exception_message": None,
+            }
             content = [{"type": "text", "text": f"{plan.instruction}\nReturn ONLY a JSON object with an observations array, one object per image, in the same order. Each observation has timestamp, visible_subjects, species, count, confidence, uncertain, and note. Inspect each image independently. Never merge evidence across images. Use timestamp labels exactly."}]
-            for timestamp, path in batch:
-                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-                content += [{"type": "text", "text": f"timestamp={timestamp:.3f}"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": "high"}}]
-            response = self._chat_observations(
-                client, messages=[{"role": "user", "content": content}]
-            )
-            parsed = self._parse_observations(
-                self._response_text(response), batch, pass_name
-            )
+            try:
+                for timestamp, path in batch:
+                    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+                    content += [{"type": "text", "text": f"timestamp={timestamp:.3f}"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": "high"}}]
+                response = self._chat_observations(
+                    client, messages=[{"role": "user", "content": content}]
+                )
+                text = self._response_text(response)
+                parsed = self._parse_observations(text, batch, pass_name)
+                payload = self._json_payload(text) if text.strip() else None
+                raw_values = (
+                    payload.get("observations", [])
+                    if isinstance(payload, dict)
+                    else payload if isinstance(payload, list) else None
+                )
+                diagnostic["returned_observations"] = len(parsed)
+                if not text.strip():
+                    diagnostic["status"] = "empty_response"
+                elif payload is None:
+                    diagnostic["status"] = "response_parsing_failure"
+                elif not isinstance(raw_values, list):
+                    diagnostic["status"] = "malformed_observations_container"
+                elif len(raw_values) != len(batch):
+                    diagnostic["status"] = "wrong_observation_count"
+                    diagnostic["provider_observation_count"] = len(raw_values)
+                elif len(parsed) != len(batch):
+                    diagnostic["status"] = "malformed_observation"
+                else:
+                    diagnostic["status"] = "complete"
+            except Exception as exc:
+                parsed = []
+                diagnostic.update(
+                    status="request_failure",
+                    exception_type=type(exc).__name__,
+                    exception_message=str(exc),
+                )
+            batch_diagnostics.append(diagnostic)
             parsed_count += len(parsed)
             observations.extend(parsed)
             parsed_timestamps = {item.timestamp for item in parsed}
@@ -320,10 +366,13 @@ class AnalyzeYouTubeVideoTool(Tool):
                         pass_name,
                         str(path),
                     ))
+        self.observation_batch_diagnostics[pass_name] = batch_diagnostics
         self.observation_parse_diagnostics[pass_name] = {
             "requested_frame_count": len(frames),
             "parsed_observation_count": parsed_count,
             "missing_observation_count": placeholder_count,
+            "complete_batches": sum(item["status"] == "complete" for item in batch_diagnostics),
+            "failed_or_incomplete_batches": sum(item["status"] != "complete" for item in batch_diagnostics),
         }
         return sorted(observations, key=lambda item: item.timestamp)
 
@@ -750,6 +799,9 @@ class AnalyzeYouTubeVideoTool(Tool):
             "coarse_diagnostics": self.coarse_diagnostics or self._coverage_diagnostics(
                 coarse, requested_frames=coarse_count
             ),
+            "coarse_batch_diagnostics": self.observation_batch_diagnostics.get(
+                "coarse", []
+            ),
             "candidate_timestamps": candidate_timestamps,
             "refinement_diagnostics": self.refinement_diagnostics,
             "refined_observations": [public(item) for item in refined],
@@ -769,4 +821,9 @@ class AnalyzeYouTubeVideoTool(Tool):
     @staticmethod
     def _response_text(response) -> str:
         blocks = response.message.content or []
-        return "\n".join(getattr(block, "text", "") for block in blocks if getattr(block, "text", None)) or str(blocks)
+        texts = [
+            getattr(block, "text", "")
+            for block in blocks
+            if getattr(block, "text", None)
+        ]
+        return "\n".join(texts)

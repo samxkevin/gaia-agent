@@ -136,9 +136,32 @@ def test_missing_provider_observations_get_temporal_placeholders(tmp_path):
         "requested_frame_count": 4,
         "parsed_observation_count": 1,
         "missing_observation_count": 3,
+        "complete_batches": 0,
+        "failed_or_incomplete_batches": 1,
     }
+    assert tool.observation_batch_diagnostics["coarse"][0]["status"] == "wrong_observation_count"
     candidates = tool._select_candidates(observations, duration=4)
     assert candidates
+
+
+def test_batch_diagnostics_distinguish_empty_parse_and_request_failures(tmp_path):
+    frames = make_frames(tmp_path, [1])
+    plan = build_video_counting_plan("maximum species visible at once")
+
+    empty_tool = AnalyzeYouTubeVideoTool(lambda: FakeClient([""]))
+    empty_tool._observe_frames(frames, plan, "coarse")
+    assert empty_tool.observation_batch_diagnostics["coarse"][0]["status"] == "empty_response"
+
+    prose_tool = AnalyzeYouTubeVideoTool(lambda: FakeClient(["not json"]))
+    prose_tool._observe_frames(frames, plan, "coarse")
+    assert prose_tool.observation_batch_diagnostics["coarse"][0]["status"] == "response_parsing_failure"
+
+    failed_tool = AnalyzeYouTubeVideoTool(lambda: FakeClient([RuntimeError("provider down")]))
+    failed_tool._observe_frames(frames, plan, "coarse")
+    diagnostic = failed_tool.observation_batch_diagnostics["coarse"][0]
+    assert diagnostic["status"] == "request_failure"
+    assert diagnostic["exception_type"] == "RuntimeError"
+    assert diagnostic["exception_message"] == "provider down"
 
 
 def test_observation_calls_prefer_structured_response_format(tmp_path):
@@ -303,10 +326,10 @@ def test_coarse_diagnostics_distinguish_zero_scores_from_missing_observations():
     }
 
 
-def test_refinement_uses_broader_bounded_local_windows(monkeypatch, tmp_path):
+def test_refinement_region_reaches_peak_near_82_seconds(monkeypatch, tmp_path):
     calls = []
     tool = AnalyzeYouTubeVideoTool()
-    candidate = FrameObservation(20, (), ("a",), 1, .9, ())
+    candidate = FrameObservation(75.35, (), ("a",), 1, .9, ())
 
     def extract(video, output, duration, count, interval, offset):
         calls.append((count, interval, offset))
@@ -314,9 +337,13 @@ def test_refinement_uses_broader_bounded_local_windows(monkeypatch, tmp_path):
 
     monkeypatch.setattr(tool, "_extract_frames", extract)
     assert tool._extract_candidate_frames(
-        tmp_path / "video", tmp_path / "frames", 100, [candidate]
+        tmp_path / "video", tmp_path / "frames", 120, [candidate]
     ) == []
-    assert calls == [(25, .5, 14.0)]
+    assert calls == [(31, 1.0, 60.0)]
+    diagnostic = tool.refinement_diagnostics[0]
+    assert diagnostic["start"] == 60
+    assert diagnostic["end"] == 90
+    assert diagnostic["start"] <= 82 <= diagnostic["end"]
 
 
 def test_single_injected_factory_controls_visual_and_synthesis(tmp_path):
