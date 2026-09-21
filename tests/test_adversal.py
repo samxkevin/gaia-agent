@@ -93,7 +93,7 @@ def test_augmented_tool_falls_back_when_adversal_is_unavailable(monkeypatch):
     assert "native-result" in result
 
 
-def test_adversal_maximum_uses_only_verified_frames_for_auxiliary_max(monkeypatch):
+def test_adversal_maximum_uses_only_verified_frames_for_auxiliary_max(monkeypatch, tmp_path):
     class FakeNative:
         def __init__(self, original_question=None):
             self.original_question = original_question
@@ -135,7 +135,7 @@ def test_adversal_maximum_uses_only_verified_frames_for_auxiliary_max(monkeypatc
                 }
             )
 
-    fake_frame = Path(monkeypatch.tmpdir if hasattr(monkeypatch, "tmpdir") else ".") / "fake.jpg"
+    fake_frame = tmp_path / "fake.jpg"
     fake_frame.write_bytes(b"x")
     evidence = type(
         "Evidence",
