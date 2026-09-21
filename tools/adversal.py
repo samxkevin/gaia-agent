@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -518,6 +519,17 @@ class AdversalAugmentedYouTubeVideoTool(Tool):
         self.original_question = original_question
 
     def forward(self, url: str, question: str, max_frames: int | None = None) -> str:
+        with tempfile.TemporaryDirectory(prefix="gaia-adversal-") as temporary:
+            root = Path(temporary)
+            return self._forward_impl(url, question, max_frames, root)
+
+    def _forward_impl(
+        self,
+        url: str,
+        question: str,
+        max_frames: int | None,
+        root: Path,
+    ) -> str:
         question = self.original_question or question
         plan: VideoCountingPlan = build_video_counting_plan(question)
 
@@ -526,7 +538,6 @@ class AdversalAugmentedYouTubeVideoTool(Tool):
                 url, question, max_frames
             )
 
-        root = Path.cwd() / ".adversal_gaia"
         job_dir = root / re.sub(r"[^A-Za-z0-9_.-]+", "_", source_id(url))
         job_dir.mkdir(parents=True, exist_ok=True)
 
