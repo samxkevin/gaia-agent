@@ -73,6 +73,63 @@ def test_structured_observations_preserve_timestamp_and_same_frame_prompt(tmp_pa
     assert len(frames) <= VISION_BATCH_SIZE
 
 
+def test_provider_schema_drift_is_normalized_per_frame(tmp_path):
+    batch = make_frames(tmp_path, [1, 2, 3, 4, 5])
+    payload = {"observations": [
+        {"species": ["a"], "visible_subjects": ["bird"], "uncertain": [], "confidence": .9},
+        {"species": "b", "visible_subjects": "bird", "uncertain": False, "confidence": "bad"},
+        {"species": ["c"], "visible_subjects": None, "uncertain": True, "count": "bad"},
+        {"species": [], "visible_subjects": 7, "uncertain": None, "count": "2"},
+        {"species": [], "visible_subjects": [], "uncertain": "none", "count": "not-a-number"},
+    ]}
+    observations = AnalyzeYouTubeVideoTool._parse_observations(
+        json.dumps(payload), batch, "coarse"
+    )
+    assert [item.timestamp for item in observations] == [1, 2, 3, 4, 5]
+    assert observations[0].uncertain == ()
+    assert observations[1].species == ("b",)
+    assert observations[1].uncertain == ()
+    assert observations[2].uncertain == ("unspecified uncertainty",)
+    assert observations[3].visible_subjects == ("7",)
+    assert observations[3].count == 2
+    assert observations[4].count == 0
+
+
+def test_parser_accepts_wrapper_legacy_array_and_fenced_json(tmp_path):
+    batch = make_frames(tmp_path, [1])
+    item = {"species": ["a"], "visible_subjects": [], "count": 1, "confidence": 1, "uncertain": [], "note": ""}
+    variants = [
+        json.dumps({"observations": [item]}),
+        json.dumps([item]),
+        "```json\n" + json.dumps({"observations": [item]}) + "\n```",
+    ]
+    for text in variants:
+        assert AnalyzeYouTubeVideoTool._parse_observations(text, batch, "coarse")[0].count == 1
+    assert AnalyzeYouTubeVideoTool._parse_observations("plain prose", batch, "coarse") == []
+
+
+def test_one_malformed_observation_does_not_discard_valid_siblings(tmp_path):
+    batch = make_frames(tmp_path, [1, 2, 3])
+    payload = {"observations": [
+        {"species": ["a"], "confidence": .8},
+        "malformed",
+        {"species": ["b", "c"], "uncertain": False, "confidence": .9},
+    ]}
+    observations = AnalyzeYouTubeVideoTool._parse_observations(
+        json.dumps(payload), batch, "coarse"
+    )
+    assert [(item.timestamp, item.count) for item in observations] == [(1, 1), (3, 2)]
+
+
+def test_observation_calls_prefer_structured_response_format(tmp_path):
+    frames = make_frames(tmp_path, [1])
+    visual = FakeClient([json.dumps({"observations": [{"species": ["a"]}]})])
+    AnalyzeYouTubeVideoTool(lambda: visual)._observe_frames(
+        frames, build_video_counting_plan("maximum species visible at once"), "coarse"
+    )
+    assert visual.calls[0]["response_format"]["schema"]["required"] == ["observations"]
+
+
 def test_independent_verifier_receives_actual_frame_without_prior_claims(tmp_path):
     frame = make_frames(tmp_path, [82.125])[0][1]
     # Independent verifier hallucinates a different timestamp; frame identity wins.
@@ -186,7 +243,7 @@ def test_refinement_uses_broader_bounded_local_windows(monkeypatch, tmp_path):
     assert tool._extract_candidate_frames(
         tmp_path / "video", tmp_path / "frames", 100, [candidate]
     ) == []
-    assert calls == [(33, .25, 16.0)]
+    assert calls == [(25, .5, 14.0)]
 
 
 def test_single_injected_factory_controls_visual_and_synthesis(tmp_path):
@@ -319,6 +376,33 @@ def test_temporal_questions_are_denser_and_refinement_is_conditional(monkeypatch
     assert ordinary.forward("https://youtu.be/abcdef", "paraphrase") == "ok"
 
 
+def test_candidate_extraction_failure_is_diagnostic_and_other_candidates_continue(monkeypatch, tmp_path):
+    tool = AnalyzeYouTubeVideoTool()
+    calls = 0
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"frame")
+
+    def extract(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("decoder failed")
+        return [(20.0, frame)]
+
+    monkeypatch.setattr(tool, "_extract_frames", extract)
+    candidates = [
+        FrameObservation(5, (), ("a",), 1, .9, ()),
+        FrameObservation(20, (), ("b",), 1, .9, ()),
+    ]
+    frames = tool._extract_candidate_frames(
+        tmp_path / "video", tmp_path / "out", 30, candidates
+    )
+    assert frames == [(20.0, frame)]
+    assert tool.refinement_diagnostics[0]["exception_type"] == "RuntimeError"
+    assert tool.refinement_diagnostics[0]["exception_message"] == "decoder failed"
+    assert tool.refinement_diagnostics[1]["status"] == "extracted"
+
+
 def test_refinement_failure_preserves_complete_coarse_result(monkeypatch, tmp_path):
     video = tmp_path / "video.mp4"; video.write_bytes(b"video")
     frame = tmp_path / "frame.jpg"; frame.write_bytes(b"frame")
@@ -333,6 +417,35 @@ def test_refinement_failure_preserves_complete_coarse_result(monkeypatch, tmp_pa
     monkeypatch.setattr(tool, "_synthesize", lambda observations, *args: captured.update(observations=observations) or "ok")
     assert tool.forward("https://youtu.be/abcdef", "ignored") == "ok"
     assert captured["observations"] == [coarse]
+    diagnostic = tool.refinement_diagnostics[0]
+    assert diagnostic["status"] == "failed"
+    assert diagnostic["exception_type"] == "RuntimeError"
+    assert diagnostic["exception_message"] == "refinement failed"
+    assert diagnostic["fallback_coarse_retained"] is True
+
+
+def test_synthesis_reports_refinement_failure():
+    synthesis = FakeClient(["summary"])
+    tool = AnalyzeYouTubeVideoTool(lambda: FakeClient([]), lambda: synthesis)
+    tool.refinement_diagnostics = [{
+        "attempted": True,
+        "candidate_timestamp": 5,
+        "start": 0,
+        "end": 11,
+        "extracted_frame_count": 0,
+        "status": "failed",
+        "exception_type": "RuntimeError",
+        "exception_message": "ffmpeg failed",
+        "fallback_coarse_retained": True,
+    }]
+    result = tool._synthesize(
+        [FrameObservation(5, (), ("a",), 1, .9, ())],
+        build_video_counting_plan("maximum species visible at once"),
+        20,
+        20,
+    )
+    assert '"refinement_failures": 1' in result
+    assert '"exception_message": "ffmpeg failed"' in result
 
 
 def test_verification_failure_does_not_fail_task_or_erase_evidence(monkeypatch, tmp_path):

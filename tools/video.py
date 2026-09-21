@@ -22,12 +22,41 @@ from models import (
 COARSE_MAX_FRAMES = 120
 COARSE_INTERVAL_SECONDS = 1.0
 REFINE_CANDIDATES = 4
-REFINE_RADIUS_SECONDS = 4.0
-REFINE_FPS = 4
+REFINE_RADIUS_SECONDS = 6.0
+REFINE_FPS = 2
 CANDIDATE_MIN_SEPARATION_SECONDS = 5.0
 VERIFICATION_LIMIT = 4
 VISION_BATCH_SIZE = 4
 MAX_FRAME_WIDTH = 1280
+
+OBSERVATION_RESPONSE_FORMAT = {
+    "type": "json_object",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "observations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "timestamp": {"type": "number"},
+                        "visible_subjects": {"type": "array", "items": {"type": "string"}},
+                        "species": {"type": "array", "items": {"type": "string"}},
+                        "count": {"type": "integer"},
+                        "confidence": {"type": "number"},
+                        "uncertain": {"type": "array", "items": {"type": "string"}},
+                        "note": {"type": "string"},
+                    },
+                    "required": [
+                        "timestamp", "visible_subjects", "species", "count",
+                        "confidence", "uncertain", "note",
+                    ],
+                },
+            }
+        },
+        "required": ["observations"],
+    },
+}
 
 
 def find_javascript_runtime(which=shutil.which) -> tuple[str, str] | None:
@@ -107,6 +136,7 @@ class AnalyzeYouTubeVideoTool(Tool):
         )
         self.original_question = original_question
         self.last_observations: list[FrameObservation] = []
+        self.refinement_diagnostics: list[dict] = []
         self.verification_diagnostics: list[dict] = []
 
     def forward(self, url: str, question: str, max_frames: int | None = None) -> str:
@@ -128,12 +158,23 @@ class AnalyzeYouTubeVideoTool(Tool):
                             refined_frames = self._extract_candidate_frames(
                                 video, root / "refined", duration, candidates
                             )
-                            observations.extend(
-                                self._observe_frames(refined_frames, plan, "refined")
-                            )
-                        except Exception:
-                            # Refinement is optional and cannot destroy coarse evidence.
-                            pass
+                            if refined_frames:
+                                observations.extend(
+                                    self._observe_frames(refined_frames, plan, "refined")
+                                )
+                        except Exception as exc:
+                            # Coarse evidence remains usable, but failure is never silent.
+                            self.refinement_diagnostics.append({
+                                "attempted": True,
+                                "candidate_timestamp": None,
+                                "start": None,
+                                "end": None,
+                                "extracted_frame_count": 0,
+                                "status": "failed",
+                                "exception_type": type(exc).__name__,
+                                "exception_message": str(exc),
+                                "fallback_coarse_retained": True,
+                            })
                     try:
                         verification_candidates = self._select_candidates(
                             self._merge_observations(observations)
@@ -193,15 +234,48 @@ class AnalyzeYouTubeVideoTool(Tool):
     def _extract_candidate_frames(self, video: Path, output_dir: Path, duration: float, candidates: list[FrameObservation]):
         frames = []
         seen = set()
+        self.refinement_diagnostics = []
         for candidate_index, candidate in enumerate(candidates[:REFINE_CANDIDATES]):
             start = max(0.0, candidate.timestamp - REFINE_RADIUS_SECONDS)
-            count = int(REFINE_RADIUS_SECONDS * 2 * REFINE_FPS) + 1
-            batch = self._extract_frames(video, output_dir / str(candidate_index), duration, count, interval=1 / REFINE_FPS, offset=start)
-            for timestamp, path in batch:
-                key = round(timestamp, 3)
-                if key not in seen:
-                    seen.add(key)
-                    frames.append((timestamp, path))
+            end = min(duration, candidate.timestamp + REFINE_RADIUS_SECONDS)
+            count = min(
+                int((end - start) * REFINE_FPS) + 1,
+                int(REFINE_RADIUS_SECONDS * 2 * REFINE_FPS) + 1,
+            )
+            diagnostic = {
+                "attempted": True,
+                "candidate_timestamp": candidate.timestamp,
+                "start": start,
+                "end": end,
+                "extracted_frame_count": 0,
+                "status": "pending",
+                "exception_type": None,
+                "exception_message": None,
+                "fallback_coarse_retained": True,
+            }
+            try:
+                batch = self._extract_frames(
+                    video,
+                    output_dir / str(candidate_index),
+                    duration,
+                    count,
+                    interval=1 / REFINE_FPS,
+                    offset=start,
+                )
+                diagnostic["extracted_frame_count"] = len(batch)
+                diagnostic["status"] = "extracted" if batch else "empty"
+                for timestamp, path in batch:
+                    key = round(timestamp, 3)
+                    if key not in seen:
+                        seen.add(key)
+                        frames.append((timestamp, path))
+            except Exception as exc:
+                diagnostic.update(
+                    status="failed",
+                    exception_type=type(exc).__name__,
+                    exception_message=str(exc),
+                )
+            self.refinement_diagnostics.append(diagnostic)
         return sorted(frames)
 
     def _observe_frames(self, frames, plan: VideoCountingPlan, pass_name: str) -> list[FrameObservation]:
@@ -209,45 +283,130 @@ class AnalyzeYouTubeVideoTool(Tool):
         observations = []
         for start in range(0, len(frames), VISION_BATCH_SIZE):
             batch = frames[start:start + VISION_BATCH_SIZE]
-            content = [{"type": "text", "text": f"{plan.instruction}\nReturn ONLY a JSON array, one object per image, in the same order. Schema: timestamp (number), visible_subjects (string array), species (distinct string array), count (integer), confidence (0..1), uncertain (string array), note (string). Inspect each image independently. Never merge evidence across images. Use timestamp labels exactly."}]
+            content = [{"type": "text", "text": f"{plan.instruction}\nReturn ONLY a JSON object with an observations array, one object per image, in the same order. Each observation has timestamp, visible_subjects, species, count, confidence, uncertain, and note. Inspect each image independently. Never merge evidence across images. Use timestamp labels exactly."}]
             for timestamp, path in batch:
                 encoded = base64.b64encode(path.read_bytes()).decode("ascii")
                 content += [{"type": "text", "text": f"timestamp={timestamp:.3f}"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": "high"}}]
-            response = client.chat(messages=[{"role": "user", "content": content}], temperature=0)
+            response = self._chat_observations(
+                client, messages=[{"role": "user", "content": content}]
+            )
             observations.extend(self._parse_observations(self._response_text(response), batch, pass_name))
         return observations
 
     @staticmethod
-    def _parse_observations(text: str, batch, pass_name: str) -> list[FrameObservation]:
-        match = re.search(r"\[[\s\S]*\]", text)
-        if not match:
-            return []
+    def _chat_observations(client, *, messages):
+        """Prefer provider-enforced JSON, falling back only for schema incompatibility."""
         try:
-            values = json.loads(match.group(0))
-        except json.JSONDecodeError:
+            return client.chat(
+                messages=messages,
+                temperature=0,
+                response_format=OBSERVATION_RESPONSE_FORMAT,
+            )
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}".lower()
+            if not any(
+                marker in detail
+                for marker in ("response_format", "schema", "structured", "typeerror", "400")
+            ):
+                raise
+            return client.chat(messages=messages, temperature=0)
+
+    @staticmethod
+    def _json_payload(text: str):
+        stripped = text.strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", stripped, re.I)
+        if fenced:
+            stripped = fenced.group(1).strip()
+        try:
+            return json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            decoder = json.JSONDecoder()
+            for index, character in enumerate(stripped):
+                if character not in "[{":
+                    continue
+                try:
+                    value, _ = decoder.raw_decode(stripped[index:])
+                    return value
+                except json.JSONDecodeError:
+                    continue
+        return None
+
+    @staticmethod
+    def _normalize_strings(value, *, uncertainty: bool = False) -> tuple[str, ...]:
+        if value is None or value is False:
+            return ()
+        if value is True:
+            return ("unspecified uncertainty",) if uncertainty else ()
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned or cleaned.lower() in {"none", "null", "false", "no", "n/a"}:
+                return ()
+            return (cleaned,)
+        if isinstance(value, (list, tuple, set)):
+            normalized = []
+            for item in value:
+                if item is None or isinstance(item, bool):
+                    continue
+                cleaned = str(item).strip()
+                if cleaned and cleaned.lower() not in {"none", "null", "false", "n/a"}:
+                    normalized.append(cleaned)
+            return tuple(dict.fromkeys(normalized))
+        cleaned = str(value).strip()
+        return (cleaned,) if cleaned else ()
+
+    @staticmethod
+    def _safe_number(value, default: float = 0.0) -> float:
+        try:
+            number = float(value)
+            return number if number == number and abs(number) != float("inf") else default
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    @classmethod
+    def _parse_observations(cls, text: str, batch, pass_name: str) -> list[FrameObservation]:
+        payload = cls._json_payload(text)
+        if isinstance(payload, dict):
+            values = payload.get("observations", [])
+        elif isinstance(payload, list):
+            values = payload
+        else:
             return []
+        if not isinstance(values, list):
+            return []
+
         result = []
         for index, value in enumerate(values[:len(batch)]):
             if not isinstance(value, dict):
                 continue
-            # Frame identity comes from FFmpeg extraction, never model-generated JSON.
-            timestamp = float(batch[index][0])
-            species = tuple(dict.fromkeys(str(x).strip() for x in value.get("species", []) if str(x).strip()))
-            subjects = tuple(str(x).strip() for x in value.get("visible_subjects", []) if str(x).strip())
-            count = len(species) if species else max(0, int(value.get("count", 0)))
-            result.append(
-                FrameObservation(
+            try:
+                # FFmpeg extraction is authoritative; provider timestamps are advisory only.
+                timestamp = float(batch[index][0])
+                species = cls._normalize_strings(value.get("species"))
+                subjects = cls._normalize_strings(value.get("visible_subjects"))
+                uncertain = cls._normalize_strings(
+                    value.get("uncertain"), uncertainty=True
+                )
+                raw_count = cls._safe_number(value.get("count"), 0.0)
+                count = len(species) if species else max(0, int(raw_count))
+                confidence = max(
+                    0.0,
+                    min(cls._safe_number(value.get("confidence"), 0.0), 1.0),
+                )
+                note = value.get("note", "")
+                result.append(FrameObservation(
                     timestamp,
                     subjects,
                     species,
                     count,
-                    max(0.0, min(float(value.get("confidence", 0)), 1.0)),
-                    tuple(str(x) for x in value.get("uncertain", [])),
-                    str(value.get("note", "")),
+                    confidence,
+                    uncertain,
+                    "" if note is None else str(note),
                     pass_name,
                     str(batch[index][1]),
-                )
-            )
+                ))
+            except Exception:
+                # One malformed frame must not discard valid siblings in the batch.
+                continue
         return result
 
     def _verify_candidates(
@@ -264,7 +423,9 @@ class AnalyzeYouTubeVideoTool(Tool):
             self.verification_diagnostics.append({
                 "timestamp": None,
                 "status": "failed",
-                "reason": f"verifier initialization failed: {type(exc).__name__}",
+                "stage": "initialization",
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
             })
             return verified
         for candidate in candidates[:VERIFICATION_LIMIT]:
@@ -283,11 +444,12 @@ class AnalyzeYouTubeVideoTool(Tool):
                 prompt = (
                     f"{plan.instruction}\nTimestamp: {candidate.timestamp:.3f} seconds. "
                     "Independently inspect only this frame. Never infer visibility from nearby "
-                    "frames. Return ONLY a JSON array with one object: timestamp, "
-                    "visible_subjects, species (distinct), count, confidence (0..1), "
-                    "uncertain, and note with concise visual justification."
+                    "frames. Return ONLY a JSON object containing an observations array "
+                    "with one object: timestamp, visible_subjects, species (distinct), "
+                    "count, confidence (0..1), uncertain, and note with concise visual justification."
                 )
-                response = client.chat(
+                response = self._chat_observations(
+                    client,
                     messages=[{
                         "role": "user",
                         "content": [
@@ -301,7 +463,6 @@ class AnalyzeYouTubeVideoTool(Tool):
                             },
                         ],
                     }],
-                    temperature=0,
                 )
                 parsed = self._parse_observations(
                     self._response_text(response),
@@ -316,28 +477,63 @@ class AnalyzeYouTubeVideoTool(Tool):
             except Exception as exc:
                 diagnostic.update(
                     status="failed",
-                    reason=f"verification request failed: {type(exc).__name__}",
+                    stage="request_or_parse",
+                    exception_type=type(exc).__name__,
+                    exception_message=str(exc),
                 )
             self.verification_diagnostics.append(diagnostic)
         return verified
 
     @staticmethod
     def _select_candidates(observations: list[FrameObservation]) -> list[FrameObservation]:
+        """Balance visual score with broad temporal coverage and uncertainty."""
+        eligible = [item for item in observations if item.count > 0 or item.uncertain]
+        if not eligible:
+            return []
         ranked = sorted(
-            (item for item in observations if item.count > 0),
-            key=lambda item: (item.count, item.confidence),
+            eligible,
+            key=lambda item: (item.count, item.confidence, len(item.uncertain)),
             reverse=True,
         )
-        selected = []
-        for item in ranked:
+        selected: list[FrameObservation] = []
+
+        def add(item):
+            if len(selected) >= REFINE_CANDIDATES:
+                return
             if all(
                 abs(item.timestamp - other.timestamp)
                 >= CANDIDATE_MIN_SEPARATION_SECONDS
                 for other in selected
             ):
                 selected.append(item)
-            if len(selected) == REFINE_CANDIDATES:
-                break
+
+        # Preserve the strongest global candidate.
+        add(ranked[0])
+
+        # Reserve opportunities for every major temporal region instead of allowing
+        # tiny score differences to consume all slots in one scene.
+        start = min(item.timestamp for item in eligible)
+        end = max(item.timestamp for item in eligible)
+        width = max((end - start) / REFINE_CANDIDATES, 0.001)
+        for region in range(REFINE_CANDIDATES):
+            lower = start + region * width
+            upper = end + 0.001 if region == REFINE_CANDIDATES - 1 else lower + width
+            regional = [item for item in ranked if lower <= item.timestamp < upper]
+            for item in regional:
+                before = len(selected)
+                add(item)
+                if len(selected) > before:
+                    break
+
+        # If regions were sparse, prioritize uncertain/activity-rich observations,
+        # then fill from the global ranking.
+        uncertain = sorted(
+            (item for item in eligible if item.uncertain),
+            key=lambda item: (item.count, 1.0 - item.confidence, len(item.uncertain)),
+            reverse=True,
+        )
+        for item in uncertain + ranked:
+            add(item)
         return selected
 
     @staticmethod
@@ -447,6 +643,11 @@ class AnalyzeYouTubeVideoTool(Tool):
             "coverage": {
                 "coarse_frames": coarse_count,
                 "refined_frames": len(refined),
+                "refinement_attempts": len(self.refinement_diagnostics),
+                "refinement_failures": sum(
+                    item.get("status") == "failed"
+                    for item in self.refinement_diagnostics
+                ),
                 "verification_attempts": len(self.verification_diagnostics),
                 "independently_verified_frames": len(verification),
                 "verification_failures": sum(
@@ -457,6 +658,7 @@ class AnalyzeYouTubeVideoTool(Tool):
                 "kind": "sampled",
             },
             "candidate_timestamps": candidate_timestamps,
+            "refinement_diagnostics": self.refinement_diagnostics,
             "refined_observations": [public(item) for item in refined],
             "verification_observations": [public(item) for item in verification],
             "verification_diagnostics": self.verification_diagnostics,
