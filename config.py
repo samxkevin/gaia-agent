@@ -56,3 +56,13 @@ FAILOVER_ATTEMPTS = int(os.getenv("FAILOVER_ATTEMPTS", "4"))
 FAILOVER_COOLDOWN_SECONDS = float(os.getenv("FAILOVER_COOLDOWN_SECONDS", "45"))
 MODEL_MAX_RETRIES = int(os.getenv("MODEL_MAX_RETRIES", "0"))
 MODEL_TIMEOUT_SECONDS = int(os.getenv("MODEL_TIMEOUT_SECONDS", "120"))
+
+ADVERSAL_ENABLED = os.getenv("ADVERSAL_ENABLED", "true").strip().lower() not in {
+    "0", "false", "no", "off"
+}
+ADVERSAL_CLI_PACKAGE = os.getenv(
+    "ADVERSAL_CLI_PACKAGE",
+    "adversal-cli==0.1.4",
+)
+ADVERSAL_TIMEOUT_SECONDS = int(os.getenv("ADVERSAL_TIMEOUT_SECONDS", "300"))
+ADVERSAL_POLL_SECONDS = int(os.getenv("ADVERSAL_POLL_SECONDS", "10"))
