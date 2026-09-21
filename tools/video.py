@@ -22,8 +22,9 @@ from models import (
 COARSE_MAX_FRAMES = 120
 COARSE_INTERVAL_SECONDS = 1.0
 REFINE_CANDIDATES = 4
-REFINE_RADIUS_SECONDS = 1.0
+REFINE_RADIUS_SECONDS = 4.0
 REFINE_FPS = 4
+CANDIDATE_MIN_SEPARATION_SECONDS = 5.0
 VERIFICATION_LIMIT = 4
 VISION_BATCH_SIZE = 4
 MAX_FRAME_WIDTH = 1280
@@ -106,6 +107,7 @@ class AnalyzeYouTubeVideoTool(Tool):
         )
         self.original_question = original_question
         self.last_observations: list[FrameObservation] = []
+        self.verification_diagnostics: list[dict] = []
 
     def forward(self, url: str, question: str, max_frames: int | None = None) -> str:
         question = self.original_question or question
@@ -254,44 +256,69 @@ class AnalyzeYouTubeVideoTool(Tool):
         plan: VideoCountingPlan,
     ) -> list[FrameObservation]:
         """Independently reinspect a few actual candidate images with Command A+."""
-        client = self.verification_client_factory()
         verified = []
+        self.verification_diagnostics = []
+        try:
+            client = self.verification_client_factory()
+        except Exception as exc:
+            self.verification_diagnostics.append({
+                "timestamp": None,
+                "status": "failed",
+                "reason": f"verifier initialization failed: {type(exc).__name__}",
+            })
+            return verified
         for candidate in candidates[:VERIFICATION_LIMIT]:
             path = Path(candidate.frame_path)
+            diagnostic = {
+                "timestamp": candidate.timestamp,
+                "status": "pending",
+            }
             if not candidate.frame_path or not path.is_file():
+                diagnostic.update(status="skipped", reason="candidate frame unavailable")
+                self.verification_diagnostics.append(diagnostic)
                 continue
-            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-            # Deliberately omit all prior labels, counts, and species claims.
-            prompt = (
-                f"{plan.instruction}\nTimestamp: {candidate.timestamp:.3f} seconds. "
-                "Independently inspect only this frame. Never infer visibility from nearby "
-                "frames. Return ONLY a JSON array with one object: timestamp, "
-                "visible_subjects, species (distinct), count, confidence (0..1), "
-                "uncertain, and note with concise visual justification."
-            )
-            response = client.chat(
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{encoded}",
-                                "detail": "high",
+            try:
+                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+                # Deliberately omit all prior labels, counts, and species claims.
+                prompt = (
+                    f"{plan.instruction}\nTimestamp: {candidate.timestamp:.3f} seconds. "
+                    "Independently inspect only this frame. Never infer visibility from nearby "
+                    "frames. Return ONLY a JSON array with one object: timestamp, "
+                    "visible_subjects, species (distinct), count, confidence (0..1), "
+                    "uncertain, and note with concise visual justification."
+                )
+                response = client.chat(
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{encoded}",
+                                    "detail": "high",
+                                },
                             },
-                        },
-                    ],
-                }],
-                temperature=0,
-            )
-            verified.extend(
-                self._parse_observations(
+                        ],
+                    }],
+                    temperature=0,
+                )
+                parsed = self._parse_observations(
                     self._response_text(response),
                     [(candidate.timestamp, path)],
                     "verification",
                 )
-            )
+                if parsed:
+                    verified.extend(parsed)
+                    diagnostic["status"] = "verified"
+                else:
+                    diagnostic.update(status="failed", reason="malformed structured response")
+            except Exception as exc:
+                diagnostic.update(
+                    status="failed",
+                    reason=f"verification request failed: {type(exc).__name__}",
+                )
+            self.verification_diagnostics.append(diagnostic)
         return verified
 
     @staticmethod
@@ -303,7 +330,11 @@ class AnalyzeYouTubeVideoTool(Tool):
         )
         selected = []
         for item in ranked:
-            if all(abs(item.timestamp - other.timestamp) >= 1.5 for other in selected):
+            if all(
+                abs(item.timestamp - other.timestamp)
+                >= CANDIDATE_MIN_SEPARATION_SECONDS
+                for other in selected
+            ):
                 selected.append(item)
             if len(selected) == REFINE_CANDIDATES:
                 break
@@ -416,13 +447,19 @@ class AnalyzeYouTubeVideoTool(Tool):
             "coverage": {
                 "coarse_frames": coarse_count,
                 "refined_frames": len(refined),
+                "verification_attempts": len(self.verification_diagnostics),
                 "independently_verified_frames": len(verification),
+                "verification_failures": sum(
+                    item.get("status") == "failed"
+                    for item in self.verification_diagnostics
+                ),
                 "exhaustive": False,
                 "kind": "sampled",
             },
             "candidate_timestamps": candidate_timestamps,
             "refined_observations": [public(item) for item in refined],
             "verification_observations": [public(item) for item in verification],
+            "verification_diagnostics": self.verification_diagnostics,
             "programmatic_maximum_observed": maximum,
             "same_frame_candidates": [public(item) for item in strongest],
         }

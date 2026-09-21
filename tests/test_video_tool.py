@@ -111,11 +111,82 @@ def test_verification_is_bounded_to_candidate_limit(tmp_path):
     assert len(verifier.calls) == 4
 
 
+def test_one_verifier_failure_does_not_cancel_later_candidate(tmp_path):
+    frames = make_frames(tmp_path, [1.0, 8.0])
+    verifier = FakeClient([
+        RuntimeError("first candidate unavailable"),
+        observation_json([8.0], [2]),
+    ])
+    tool = AnalyzeYouTubeVideoTool(
+        lambda: FakeClient([]), verification_client_factory=lambda: verifier
+    )
+    candidates = [
+        FrameObservation(timestamp, (), ("a",), 1, .8, (), frame_path=str(path))
+        for timestamp, path in frames
+    ]
+    verified = tool._verify_candidates(
+        candidates, build_video_counting_plan("maximum species visible at once")
+    )
+    assert [item.timestamp for item in verified] == [8.0]
+    assert [item["status"] for item in tool.verification_diagnostics] == [
+        "failed", "verified"
+    ]
+
+
+def test_malformed_verifier_json_is_reported_as_failed_attempt(tmp_path):
+    frame = make_frames(tmp_path, [4.0])[0]
+    verifier = FakeClient(["not structured json"])
+    tool = AnalyzeYouTubeVideoTool(
+        lambda: FakeClient([]), verification_client_factory=lambda: verifier
+    )
+    candidate = FrameObservation(
+        4.0, (), ("a",), 1, .8, (), frame_path=str(frame[1])
+    )
+    assert tool._verify_candidates(
+        [candidate], build_video_counting_plan("maximum species visible at once")
+    ) == []
+    assert tool.verification_diagnostics == [{
+        "timestamp": 4.0,
+        "status": "failed",
+        "reason": "malformed structured response",
+    }]
+
+
 def test_candidate_selection_finds_high_counts_and_separates_regions():
     observations = [FrameObservation(t, (), ("a",) * c, c, .9, ()) for t, c in [(1, 1), (2, 3), (2.5, 3), (8, 2)]]
     selected = AnalyzeYouTubeVideoTool._select_candidates(observations)
     assert selected[0].timestamp == 2
     assert 2.5 not in [x.timestamp for x in selected]
+
+
+def test_candidate_selection_is_temporally_diverse():
+    observations = [
+        FrameObservation(t, (), ("a",) * count, count, .9, ())
+        for t, count in [(76, 3), (78, 3), (82, 2), (90, 2)]
+    ]
+    timestamps = [
+        item.timestamp for item in AnalyzeYouTubeVideoTool._select_candidates(observations)
+    ]
+    assert 76 in timestamps
+    assert 78 not in timestamps
+    assert 82 in timestamps
+    assert 90 in timestamps
+
+
+def test_refinement_uses_broader_bounded_local_windows(monkeypatch, tmp_path):
+    calls = []
+    tool = AnalyzeYouTubeVideoTool()
+    candidate = FrameObservation(20, (), ("a",), 1, .9, ())
+
+    def extract(video, output, duration, count, interval, offset):
+        calls.append((count, interval, offset))
+        return []
+
+    monkeypatch.setattr(tool, "_extract_frames", extract)
+    assert tool._extract_candidate_frames(
+        tmp_path / "video", tmp_path / "frames", 100, [candidate]
+    ) == []
+    assert calls == [(33, .25, 16.0)]
 
 
 def test_single_injected_factory_controls_visual_and_synthesis(tmp_path):

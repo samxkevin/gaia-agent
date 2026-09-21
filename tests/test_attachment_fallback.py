@@ -46,6 +46,15 @@ def test_parquet_metadata_resolves_authoritative_file_path(monkeypatch, tmp_path
     ]
 
 
+def test_gated_dataset_403_requires_authorized_hf_token(monkeypatch):
+    def forbidden(**kwargs):
+        raise RuntimeError("403 Forbidden")
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", forbidden)
+    with pytest.raises(RuntimeError, match="HF_TOKEN.*accepted GAIA dataset access"):
+        client._official_gaia_file("task-id")
+
+
 def test_scoring_endpoint_is_used_when_available(monkeypatch, tmp_path):
     monkeypatch.setattr(client.SESSION, "get", lambda *args, **kwargs: Response(200, b"official bytes"))
     monkeypatch.setattr(client, "_official_gaia_file", lambda task_id: pytest.fail("fallback called"))

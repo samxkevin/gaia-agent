@@ -73,10 +73,19 @@ def _official_gaia_file(task_id: str) -> Path:
         # file_path is authoritative; file_name is only display metadata.
         return Path(hf_hub_download(filename=str(dataset_path), **options))
     except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        access_denied = any(
+            marker in detail.lower()
+            for marker in ("403", "401", "forbidden", "unauthorized", "gated")
+        )
+        guidance = (
+            "An HF_TOKEN belonging to an account with accepted GAIA dataset access is required."
+            if access_denied
+            else "Request GAIA dataset access and configure HF_TOKEN if authentication is required."
+        )
         raise RuntimeError(
             "Scoring attachment endpoint returned 404 and the official gated GAIA "
-            "dataset fallback was unavailable. Request GAIA dataset access and set HF_TOKEN. "
-            f"Details: {type(exc).__name__}: {exc}"
+            f"dataset fallback was unavailable. {guidance} Details: {detail}"
         ) from exc
 
 

@@ -45,14 +45,14 @@ class Delegate:
         return self.response
 
 
-def repair(original, repaired):
+def repair(original, repaired, question="question and tool evidence"):
     delegate = Delegate(repaired)
     tool = SimpleNamespace(name="final_answer")
     result = FailoverModel._repair_malformed_final_answer(
         FailoverModel.__new__(FailoverModel),
         delegate=delegate,
         result=original,
-        messages=[{"role": "user", "content": "question and tool evidence"}],
+        messages=[{"role": "user", "content": question}],
         final_answer_tool=tool,
         stop_sequences=None,
         response_format=None,
@@ -82,6 +82,53 @@ def test_malformed_final_answer_triggers_exactly_one_repair(arguments):
     assert options["tools_to_call_from"] == [tool]
     assert [item.name for item in options["tools_to_call_from"]] == ["final_answer"]
     assert "Do not research or reconsider" in repair_messages[-1]["content"]
+
+
+def test_minimal_simple_answer_is_not_repaired():
+    original = message({"answer": "Right"})
+    result, delegate, _ = repair(
+        original,
+        message({"answer": "changed"}),
+        question="What is the opposite of left?",
+    )
+    assert result is original
+    assert delegate.calls == []
+
+
+def test_verbose_simple_answer_gets_one_canonicalization_repair():
+    original = message({"answer": "The answer is right."})
+    fixed = message({"answer": "Right"})
+    result, delegate, _ = repair(
+        original,
+        fixed,
+        question="What is the opposite of left? Answer with one word.",
+    )
+    assert result is fixed
+    assert len(delegate.calls) == 1
+    assert "Current answer value:\nThe answer is right." in delegate.calls[0][0][-1]["content"]
+
+
+def test_reversed_exact_answer_instruction_gets_canonicalization_repair():
+    question = '.rewsna eht sa "tfel" drow eht fo etisoppo eht etirw ,ecnetnes siht dnatsrednu uoy fI'
+    original = message({
+        "answer": 'If you read this sentence backwards, the opposite of the word "left" is right, the word'
+    })
+    fixed = message({"answer": "Right"})
+    result, delegate, _ = repair(original, fixed, question=question)
+    assert result is fixed
+    assert len(delegate.calls) == 1
+    assert "Do not research or reconsider" in delegate.calls[0][0][-1]["content"]
+
+
+def test_legitimate_long_answer_is_not_canonicalized():
+    original = message({"answer": "The mechanism works because pressure falls across the valve."})
+    result, delegate, _ = repair(
+        original,
+        message({"answer": "changed"}),
+        question="Explain which word describes the mechanism and justify your answer.",
+    )
+    assert result is original
+    assert delegate.calls == []
 
 
 @pytest.mark.parametrize("answer", ["yes", 0])

@@ -278,6 +278,57 @@ class FailoverModel(Model):
             for call in (result.tool_calls or [])
         ) and not cls._has_valid_final_answer(result)
 
+    @classmethod
+    def _answer_value(cls, result):
+        arguments = cls._final_answer_arguments(result)
+        return arguments.get("answer") if arguments else None
+
+    @staticmethod
+    def _message_text(messages) -> str:
+        parts = []
+        for message in messages or []:
+            content = (
+                message.get("content")
+                if isinstance(message, dict)
+                else getattr(message, "content", None)
+            )
+            if isinstance(content, str):
+                parts.append(content)
+        return "\n".join(parts).lower()
+
+    @classmethod
+    def _needs_canonical_answer_repair(cls, result, messages) -> bool:
+        """Detect verbose serialization only for clearly short exact-answer tasks."""
+        answer = cls._answer_value(result)
+        if not isinstance(answer, str) or len(answer.split()) <= 1:
+            return False
+        task_text = cls._message_text(messages)
+        # Some exact-answer tasks encode their instruction by reversing the full
+        # string. Decode only for task-shape classification; the answer itself is
+        # still produced by the model's existing conclusion and one repair call.
+        task_variants = (task_text, task_text[::-1])
+        simple_markers = (
+            "opposite of",
+            "one word",
+            "single word",
+            "answer with the word",
+            "what word",
+            "which word",
+        )
+        matching_variants = [
+            variant
+            for variant in task_variants
+            if any(marker in variant for marker in simple_markers)
+        ]
+        if not matching_variants:
+            return False
+        # Explanatory tasks legitimately need prose even when they mention a word.
+        return not any(
+            marker in variant
+            for variant in matching_variants
+            for marker in ("explain", "describe", "justify", "show your work")
+        )
+
     @staticmethod
     def _reasoning_content(result) -> str:
         """Keep reasoning retained by OpenAIModel in the raw provider response."""
@@ -322,19 +373,28 @@ class FailoverModel(Model):
         only the already-derived answer, exposing only the final tool.  This stays
         at the model boundary, where malformed compatibility responses belong.
         """
-        if final_answer_tool is None or not self._has_malformed_final_answer(result):
+        malformed = self._has_malformed_final_answer(result)
+        verbose_simple_answer = self._needs_canonical_answer_repair(result, messages)
+        if final_answer_tool is None or not (malformed or verbose_simple_answer):
             return result
 
         prior_reasoning = self._reasoning_content(result)
+        current_answer = self._answer_value(result)
         repair_messages = list(messages) + [
             {
                 "role": "user",
                 "content": (
-                    "Your preceding response selected final_answer but omitted its "
-                    "required answer argument. Do not research or reconsider the "
-                    "task. Using the conclusion already reached, call final_answer "
-                    "now with exactly one non-empty argument named answer. The "
-                    "answer value must contain only what the original task requests."
+                    "Your preceding response selected final_answer but its argument "
+                    "was missing, invalid, or unnecessarily verbose for the original "
+                    "exact-answer task. Do not research or reconsider the task. Using "
+                    "only the conclusion already reached, call final_answer now with "
+                    "exactly one non-empty argument named answer. Return the minimal "
+                    "answer value requested by the original task, without explanation."
+                    + (
+                        f"\n\nCurrent answer value:\n{current_answer}"
+                        if current_answer is not None
+                        else ""
+                    )
                     + (
                         f"\n\nPreceding reasoning:\n{prior_reasoning}"
                         if prior_reasoning
