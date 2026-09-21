@@ -11,3 +11,4 @@ env/
 .gaia_attachments/
 .gaia_debug_attachments/
 .gaia_debug_runs/
+.adversal_gaia/
