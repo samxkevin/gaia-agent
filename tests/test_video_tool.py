@@ -238,8 +238,17 @@ def test_refined_single_frame_retry_is_hard_capped(monkeypatch, tmp_path):
     assert len(verifier.calls) == 2
     assert len(tool.single_frame_retry_diagnostics["refined"]) == 2
     assert tool.observation_parse_diagnostics["refined"][
-        "missing_observation_count"
+        "single_frame_retry_attempts"
     ] == 2
+    assert tool.observation_parse_diagnostics["refined"][
+        "single_frame_retry_successes"
+    ] == 0
+    assert tool.observation_parse_diagnostics["refined"][
+        "single_frame_retry_failures"
+    ] == 2
+    assert tool.observation_parse_diagnostics["refined"][
+        "missing_observation_count"
+    ] == 4
     assert tool.observation_parse_diagnostics["refined"][
         "single_frame_retry_capped"
     ] is True
