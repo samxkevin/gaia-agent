@@ -377,7 +377,20 @@ class AnalyzeYouTubeVideoTool(Tool):
             batch_diagnostics.append(diagnostic)
 
         recovered_timestamps: set[float] = set()
+        retry_client = None
         if pending_missing and retry_limit:
+            try:
+                retry_client = self.verification_client_factory()
+            except Exception as exc:
+                retry_diagnostics.append({
+                    "timestamp": None,
+                    "batch_index": None,
+                    "status": "single_frame_retry_failure",
+                    "reason": "verification client initialization failed",
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc),
+                })
+        if pending_missing and retry_limit and retry_client is not None:
             ordered_missing = sorted(
                 pending_missing,
                 key=lambda item: (
@@ -401,9 +414,9 @@ class AnalyzeYouTubeVideoTool(Tool):
                 }
                 try:
                     response = self._chat_observations(
-                        client,
-                        messages=self._observation_messages(
-                            plan, [(timestamp, path)]
+                        retry_client,
+                        messages=self._verification_observation_messages(
+                            plan, timestamp, path
                         ),
                     )
                     retry_parsed = self._parse_observations(
@@ -507,6 +520,32 @@ class AnalyzeYouTubeVideoTool(Tool):
                 },
             ]
         return [{"role": "user", "content": content}]
+
+    @staticmethod
+    def _verification_observation_messages(
+        plan: VideoCountingPlan, timestamp: float, path: Path
+    ) -> list[dict]:
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        prompt = (
+            f"{plan.instruction}\nTimestamp: {timestamp:.3f} seconds. "
+            "Independently inspect only this frame. Never infer visibility from nearby "
+            "frames. Return ONLY a JSON object containing an observations array "
+            "with one object: timestamp, visible_subjects, species (distinct), "
+            "count, confidence (0..1), uncertain, and note with concise visual justification."
+        )
+        return [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{encoded}",
+                        "detail": "high",
+                    },
+                },
+            ],
+        }]
 
     @staticmethod
     def _chat_observations(client, *, messages):
