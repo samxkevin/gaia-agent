@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -258,7 +259,7 @@ class AnalyzeYouTubeVideoTool(Tool):
             seen_regions.add(region)
             start = region * region_width
             end = duration if region == REFINE_CANDIDATES - 1 else (region + 1) * region_width
-            count = int((end - start) / REFINE_REGION_INTERVAL_SECONDS) + 1
+            sampling_segments = self._refinement_sampling_segments(start, end)
             diagnostic = {
                 "attempted": True,
                 "region_index": region,
@@ -266,6 +267,7 @@ class AnalyzeYouTubeVideoTool(Tool):
                 "start": start,
                 "end": end,
                 "interval_seconds": REFINE_REGION_INTERVAL_SECONDS,
+                "sampling_offsets": [offset for offset, _ in sampling_segments],
                 "extracted_frame_count": 0,
                 "status": "pending",
                 "exception_type": None,
@@ -273,14 +275,18 @@ class AnalyzeYouTubeVideoTool(Tool):
                 "fallback_coarse_retained": True,
             }
             try:
-                batch = self._extract_frames(
-                    video,
-                    output_dir / str(candidate_index),
-                    duration,
-                    count,
-                    interval=REFINE_REGION_INTERVAL_SECONDS,
-                    offset=start,
-                )
+                batch = []
+                for segment_index, (offset, count) in enumerate(sampling_segments):
+                    batch.extend(
+                        self._extract_frames(
+                            video,
+                            output_dir / str(candidate_index) / str(segment_index),
+                            duration,
+                            count,
+                            interval=REFINE_REGION_INTERVAL_SECONDS,
+                            offset=offset,
+                        )
+                    )
                 diagnostic["extracted_frame_count"] = len(batch)
                 diagnostic["status"] = "extracted" if batch else "empty"
                 for timestamp, path in batch:
@@ -296,6 +302,22 @@ class AnalyzeYouTubeVideoTool(Tool):
                 )
             self.refinement_diagnostics.append(diagnostic)
         return sorted(frames)
+
+    @staticmethod
+    def _refinement_sampling_segments(
+        start: float, end: float
+    ) -> list[tuple[float, int]]:
+        """Cover a region boundary, then sample on stable global second boundaries."""
+        interval = REFINE_REGION_INTERVAL_SECONDS
+        aligned_start = math.ceil(start / interval) * interval
+        aligned_end = math.floor(end / interval) * interval
+        segments = []
+        if not math.isclose(start, aligned_start, abs_tol=1e-9):
+            segments.append((start, 1))
+        if aligned_start <= aligned_end:
+            count = int(round((aligned_end - aligned_start) / interval)) + 1
+            segments.append((aligned_start, count))
+        return segments or [(start, 1)]
 
     def _observe_frames(self, frames, plan: VideoCountingPlan, pass_name: str) -> list[FrameObservation]:
         client = self.visual_client_factory()
@@ -496,6 +518,21 @@ class AnalyzeYouTubeVideoTool(Tool):
         return sorted(observations, key=lambda item: item.timestamp)
 
     @staticmethod
+    def _species_counting_guidance(plan: VideoCountingPlan) -> str:
+        if not plan.distinct_categories:
+            return ""
+        return (
+            " Count distinct biological species, not broad categories. Inspect every visually "
+            "distinct group independently. Do not merge birds merely because both are penguins "
+            "or share another broad label. Compare visible morphology, plumage, head and bill "
+            "shape, and body pattern when available. Age or life stage alone does not establish "
+            "a different species: do not split adults and chicks solely because their plumage "
+            "differs, but also do not assume they are the same species without visible support. "
+            "The count must equal the number of visually supported distinct species in this "
+            "frame. Mark uncertain identifications as uncertain; never invent a species."
+        )
+
+    @staticmethod
     def _observation_messages(plan: VideoCountingPlan, batch) -> list[dict]:
         content = [{
             "type": "text",
@@ -505,6 +542,7 @@ class AnalyzeYouTubeVideoTool(Tool):
                 "visible_subjects, species, count, confidence, uncertain, and note. "
                 "Inspect each image independently. Never merge evidence across images. "
                 "Use timestamp labels exactly."
+                + AnalyzeYouTubeVideoTool._species_counting_guidance(plan)
             ),
         }]
         for timestamp, path in batch:
@@ -526,12 +564,14 @@ class AnalyzeYouTubeVideoTool(Tool):
         plan: VideoCountingPlan, timestamp: float, path: Path
     ) -> list[dict]:
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        guidance = AnalyzeYouTubeVideoTool._species_counting_guidance(plan)
         prompt = (
             f"{plan.instruction}\nTimestamp: {timestamp:.3f} seconds. "
             "Independently inspect only this frame. Never infer visibility from nearby "
             "frames. Return ONLY a JSON object containing an observations array "
             "with one object: timestamp, visible_subjects, species (distinct), "
             "count, confidence (0..1), uncertain, and note with concise visual justification."
+            + guidance
         )
         return [{
             "role": "user",
