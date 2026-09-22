@@ -741,3 +741,63 @@ def test_frame_extraction_is_resource_bounded(monkeypatch, tmp_path):
 
 def test_javascript_runtime_accepts_node():
     assert find_javascript_runtime({"node": "/node"}.get) == ("node", "/node")
+
+
+def test_species_guidance_is_shared_without_treating_age_as_a_species(tmp_path):
+    frame = make_frames(tmp_path, [82.0])[0]
+    plan = build_video_counting_plan("maximum bird species visible at once")
+
+    batch_prompt = AnalyzeYouTubeVideoTool._observation_messages(
+        plan, [frame]
+    )[0]["content"][0]["text"]
+    verifier_prompt = AnalyzeYouTubeVideoTool._verification_observation_messages(
+        plan, frame[0], frame[1]
+    )[0]["content"][0]["text"]
+
+    for prompt in (batch_prompt, verifier_prompt):
+        assert "distinct biological species" in prompt
+        assert "Do not merge birds merely because both are penguins" in prompt
+        assert "Age or life stage alone does not establish a different species" in prompt
+        assert "count must equal" in prompt
+        assert "never invent a species" in prompt
+        assert "Never combine" in prompt or "Never infer visibility" in prompt
+
+    individual_plan = build_video_counting_plan("maximum birds visible at once")
+    individual_prompt = AnalyzeYouTubeVideoTool._observation_messages(
+        individual_plan, [frame]
+    )[0]["content"][0]["text"]
+    assert "distinct biological species" not in individual_prompt
+
+
+def test_fractional_refinement_region_keeps_boundary_and_aligns_whole_seconds(
+    monkeypatch, tmp_path
+):
+    calls = []
+    tool = AnalyzeYouTubeVideoTool()
+    candidate = FrameObservation(75.35, (), ("a",), 1, .9, ())
+
+    def extract(video, output, duration, count, interval, offset):
+        calls.append((count, interval, offset))
+        return [
+            (offset + index * interval, output / f"{index:04d}.jpg")
+            for index in range(count)
+        ]
+
+    monkeypatch.setattr(tool, "_extract_frames", extract)
+    frames = tool._extract_candidate_frames(
+        tmp_path / "video", tmp_path / "frames", 120.56, [candidate]
+    )
+
+    region_start = 2 * (120.56 / 4)
+    assert calls == [(1, 1.0, region_start), (30, 1.0, 61.0)]
+    timestamps = [timestamp for timestamp, _ in frames]
+    assert region_start in timestamps
+    assert 82.0 in timestamps
+    assert all(
+        region_start <= timestamp <= 3 * (120.56 / 4)
+        for timestamp in timestamps
+    )
+    diagnostic = tool.refinement_diagnostics[0]
+    assert diagnostic["start"] == region_start
+    assert diagnostic["end"] == 3 * (120.56 / 4)
+    assert diagnostic["sampling_offsets"] == [region_start, 61.0]
