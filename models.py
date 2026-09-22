@@ -505,7 +505,10 @@ class CohereFailoverClient:
         for route in self._ordered_routes()[:FAILOVER_ATTEMPTS]:
             identity = (route.key_slot, route.model_id)
             try:
-                client = cohere.ClientV2(route.api_key)
+                client = cohere.ClientV2(
+                    route.api_key,
+                    log_warning_experimental_features=False,
+                )
                 response = client.chat(
                     model=route.model_id,
                     **kwargs,
@@ -538,7 +541,10 @@ class CohereFailoverClient:
         errors = []
         for route in routes[:FAILOVER_ATTEMPTS]:
             try:
-                client = cohere.ClientV2(route.api_key)
+                client = cohere.ClientV2(
+                    route.api_key,
+                    log_warning_experimental_features=False,
+                )
                 with open(file_path, "rb") as audio_file:
                     response = client.audio.transcriptions.create(
                         model=route.model_id,
