@@ -386,7 +386,7 @@ class AnalyzeYouTubeVideoTool(Tool):
                             abs(float(item[0]) - float(candidate))
                             for candidate in candidate_timestamps
                         ),
-                        float("inf"),
+                        default=float("inf"),
                     ),
                     float(item[0]),
                 ),
