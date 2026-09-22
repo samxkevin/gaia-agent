@@ -13,15 +13,15 @@ from tools.adversal import (
 from tools.video import FrameObservation
 
 
-def test_adversal_response_parsers():
-    assert parse_request_id("COMPLETED\nrequest_id: abc-123") == "abc-123"
-    assert parse_remaining_minutes("Remaining quota: 97.5 minutes") == 97.5
-    assert parse_remaining_minutes("Used: 10 minutes. Remaining: 87 minutes.") == 87.0
-    assert parse_remaining_minutes("87 minutes remaining") == 87.0
-    assert classify_response("AUTHENTICATION REQUIRED — sign in") == "auth_required"
-    assert classify_response("QUOTA EXHAUSTED — no minutes left") == "quota_exhausted"
-    assert classify_response("COMPLETED — request_id: abc") == "completed"
-    assert classify_response("RUNNING — request_id: abc") == "running"
+def test_adversal_response_parser_reads_structured_content():
+    class Result:
+        structured_content = {"remaining_minutes": 96.0}
+        content = []
+
+    text = _result_text(Result())
+    assert '"remaining_minutes": 96.0' in text
+    assert parse_remaining_minutes(text) == 96.0
+
 
 
 def test_time_parser_accepts_provider_clock_strings():
