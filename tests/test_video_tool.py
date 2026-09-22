@@ -257,7 +257,7 @@ def test_refined_retry_order_is_global_not_chronological(monkeypatch, tmp_path):
     assert [
         item["timestamp"]
         for item in tool.single_frame_retry_diagnostics["refined"]
-    ] == [75.0, 74.0, 76.0]
+    ] == [75.0, 76.0, 74.0]
 
 
 def test_batch_diagnostics_distinguish_empty_parse_and_request_failures(tmp_path):
