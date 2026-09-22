@@ -26,6 +26,7 @@ REFINE_REGION_INTERVAL_SECONDS = 1.0
 CANDIDATE_MIN_SEPARATION_SECONDS = 5.0
 VERIFICATION_LIMIT = 4
 VISION_BATCH_SIZE = 4
+REFINED_SINGLE_FRAME_RETRY_LIMIT = 50
 MAX_FRAME_WIDTH = 1280
 
 OBSERVATION_RESPONSE_FORMAT = {
@@ -140,6 +141,7 @@ class AnalyzeYouTubeVideoTool(Tool):
         self.coarse_diagnostics: dict = {}
         self.refinement_diagnostics: list[dict] = []
         self.verification_diagnostics: list[dict] = []
+        self.single_frame_retry_diagnostics: dict[str, list[dict]] = {}
 
     def forward(self, url: str, question: str, max_frames: int | None = None) -> str:
         question = self.original_question or question
@@ -301,23 +303,33 @@ class AnalyzeYouTubeVideoTool(Tool):
         parsed_count = 0
         placeholder_count = 0
         batch_diagnostics = []
+        retry_diagnostics = []
+        pending_missing: list[tuple[float, Path, int]] = []
+        batch_missing: dict[int, set[float]] = {}
+        retry_limit = (
+            REFINED_SINGLE_FRAME_RETRY_LIMIT if pass_name == "refined" else 0
+        )
+        candidate_timestamps = [
+            item.get("candidate_timestamp")
+            for item in self.refinement_diagnostics
+            if item.get("candidate_timestamp") is not None
+        ]
+
         for start in range(0, len(frames), VISION_BATCH_SIZE):
+            batch_index = start // VISION_BATCH_SIZE
             batch = frames[start:start + VISION_BATCH_SIZE]
             diagnostic = {
-                "batch_index": start // VISION_BATCH_SIZE,
+                "batch_index": batch_index,
                 "requested_observations": len(batch),
                 "returned_observations": 0,
                 "status": "pending",
                 "exception_type": None,
                 "exception_message": None,
             }
-            content = [{"type": "text", "text": f"{plan.instruction}\nReturn ONLY a JSON object with an observations array, one object per image, in the same order. Each observation has timestamp, visible_subjects, species, count, confidence, uncertain, and note. Inspect each image independently. Never merge evidence across images. Use timestamp labels exactly."}]
             try:
-                for timestamp, path in batch:
-                    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-                    content += [{"type": "text", "text": f"timestamp={timestamp:.3f}"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": "high"}}]
                 response = self._chat_observations(
-                    client, messages=[{"role": "user", "content": content}]
+                    client,
+                    messages=self._observation_messages(plan, batch),
                 )
                 text = self._response_text(response)
                 parsed = self._parse_observations(text, batch, pass_name)
@@ -348,24 +360,103 @@ class AnalyzeYouTubeVideoTool(Tool):
                     exception_type=type(exc).__name__,
                     exception_message=str(exc),
                 )
-            batch_diagnostics.append(diagnostic)
-            parsed_count += len(parsed)
+
             observations.extend(parsed)
+            parsed_count += len(parsed)
             parsed_timestamps = {item.timestamp for item in parsed}
-            for timestamp, path in batch:
-                if float(timestamp) not in parsed_timestamps:
-                    placeholder_count += 1
-                    observations.append(FrameObservation(
-                        float(timestamp),
-                        (),
-                        (),
-                        0,
-                        0.0,
-                        ("provider observation missing",),
-                        "No parseable observation was returned for this extracted frame.",
-                        pass_name,
-                        str(path),
-                    ))
+            missing_frames = [
+                (float(timestamp), path)
+                for timestamp, path in batch
+                if float(timestamp) not in parsed_timestamps
+            ]
+            batch_missing[batch_index] = {timestamp for timestamp, _ in missing_frames}
+            pending_missing.extend(
+                (timestamp, path, batch_index)
+                for timestamp, path in missing_frames
+            )
+            batch_diagnostics.append(diagnostic)
+
+        recovered_timestamps: set[float] = set()
+        if pending_missing and retry_limit:
+            ordered_missing = sorted(
+                pending_missing,
+                key=lambda item: (
+                    min(
+                        (
+                            abs(float(item[0]) - float(candidate))
+                            for candidate in candidate_timestamps
+                        ),
+                        float("inf"),
+                    ),
+                    float(item[0]),
+                ),
+            )
+            for timestamp, path, batch_index in ordered_missing:
+                if len(retry_diagnostics) >= retry_limit:
+                    break
+                retry = {
+                    "timestamp": timestamp,
+                    "batch_index": batch_index,
+                    "status": "single_frame_retry_pending",
+                }
+                try:
+                    response = self._chat_observations(
+                        client,
+                        messages=self._observation_messages(
+                            plan, [(timestamp, path)]
+                        ),
+                    )
+                    retry_parsed = self._parse_observations(
+                        self._response_text(response),
+                        [(timestamp, path)],
+                        "refined",
+                    )
+                    if retry_parsed:
+                        observations.extend(retry_parsed)
+                        parsed_count += len(retry_parsed)
+                        recovered_timestamps.add(timestamp)
+                        retry["status"] = "single_frame_retry_success"
+                    else:
+                        retry["status"] = "single_frame_retry_failure"
+                        retry["reason"] = "malformed structured response"
+                except Exception as exc:
+                    retry.update(
+                        status="single_frame_retry_failure",
+                        exception_type=type(exc).__name__,
+                        exception_message=str(exc),
+                    )
+                retry_diagnostics.append(retry)
+
+        retry_attempted_timestamps = {
+            item["timestamp"]
+            for item in retry_diagnostics
+            if item["status"] in {
+                "single_frame_retry_success",
+                "single_frame_retry_failure",
+            }
+        }
+        for diagnostic in batch_diagnostics:
+            missing = batch_missing[diagnostic["batch_index"]]
+            diagnostic["single_frame_retry_count"] = len(
+                missing & retry_attempted_timestamps
+            )
+
+        for timestamp, path, _ in pending_missing:
+            if timestamp not in recovered_timestamps:
+                placeholder_count += 1
+                observations.append(FrameObservation(
+                    timestamp,
+                    (),
+                    (),
+                    0,
+                    0.0,
+                    ("provider observation missing",),
+                    "No parseable observation was returned for this extracted frame.",
+                    pass_name,
+                    str(path),
+                ))
+
+        self.single_frame_retry_diagnostics[pass_name] = retry_diagnostics
         self.observation_batch_diagnostics[pass_name] = batch_diagnostics
         self.observation_parse_diagnostics[pass_name] = {
             "requested_frame_count": len(frames),
@@ -373,8 +464,49 @@ class AnalyzeYouTubeVideoTool(Tool):
             "missing_observation_count": placeholder_count,
             "complete_batches": sum(item["status"] == "complete" for item in batch_diagnostics),
             "failed_or_incomplete_batches": sum(item["status"] != "complete" for item in batch_diagnostics),
+            "single_frame_retry_attempts": len(retry_diagnostics),
+            "single_frame_retry_successes": sum(
+                item["status"] == "single_frame_retry_success"
+                for item in retry_diagnostics
+            ),
+            "single_frame_retry_failures": sum(
+                item["status"] == "single_frame_retry_failure"
+                for item in retry_diagnostics
+            ),
+            "single_frame_retry_limit": retry_limit,
+            "single_frame_retry_capped": bool(
+                retry_limit
+                and placeholder_count
+                and len(retry_diagnostics) >= retry_limit
+            ),
         }
         return sorted(observations, key=lambda item: item.timestamp)
+
+    @staticmethod
+    def _observation_messages(plan: VideoCountingPlan, batch) -> list[dict]:
+        content = [{
+            "type": "text",
+            "text": (
+                f"{plan.instruction}\nReturn ONLY a JSON object with an observations array, "
+                "one object per image, in the same order. Each observation has timestamp, "
+                "visible_subjects, species, count, confidence, uncertain, and note. "
+                "Inspect each image independently. Never merge evidence across images. "
+                "Use timestamp labels exactly."
+            ),
+        }]
+        for timestamp, path in batch:
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            content += [
+                {"type": "text", "text": f"timestamp={timestamp:.3f}"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{encoded}",
+                        "detail": "high",
+                    },
+                },
+            ]
+        return [{"role": "user", "content": content}]
 
     @staticmethod
     def _chat_observations(client, *, messages):
@@ -802,6 +934,8 @@ class AnalyzeYouTubeVideoTool(Tool):
             "coarse_batch_diagnostics": self.observation_batch_diagnostics.get(
                 "coarse", []
             ),
+            "observation_parse_diagnostics": self.observation_parse_diagnostics,
+            "single_frame_retry_diagnostics": self.single_frame_retry_diagnostics,
             "candidate_timestamps": candidate_timestamps,
             "refinement_diagnostics": self.refinement_diagnostics,
             "refined_observations": [public(item) for item in refined],

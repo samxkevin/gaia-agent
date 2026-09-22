@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+import tools.video as video_module
 from tools.video import (
     AnalyzeYouTubeVideoTool,
     FrameObservation,
@@ -138,10 +139,125 @@ def test_missing_provider_observations_get_temporal_placeholders(tmp_path):
         "missing_observation_count": 3,
         "complete_batches": 0,
         "failed_or_incomplete_batches": 1,
+        "single_frame_retry_attempts": 0,
+        "single_frame_retry_successes": 0,
+        "single_frame_retry_failures": 0,
+        "single_frame_retry_limit": 0,
+        "single_frame_retry_capped": False,
     }
     assert tool.observation_batch_diagnostics["coarse"][0]["status"] == "wrong_observation_count"
     candidates = tool._select_candidates(observations, duration=4)
     assert candidates
+
+
+def test_missing_refined_observations_are_retried_as_single_frames(tmp_path):
+    frames = make_frames(tmp_path, [80.0, 81.0, 82.0, 83.0])
+    visual = FakeClient([
+        json.dumps({"observations": []}),
+        observation_json([80.0], [1]),
+        observation_json([81.0], [1]),
+        observation_json([82.0], [3]),
+        observation_json([83.0], [1]),
+    ])
+    tool = AnalyzeYouTubeVideoTool(lambda: visual)
+    tool.refinement_diagnostics = [{
+        "candidate_timestamp": 75.35,
+        "start": 60.0,
+        "end": 90.0,
+    }]
+    observations = tool._observe_frames(
+        frames,
+        build_video_counting_plan("maximum bird species visible at once"),
+        "refined",
+    )
+
+    assert [(item.timestamp, item.count) for item in observations] == [
+        (80.0, 1),
+        (81.0, 1),
+        (82.0, 3),
+        (83.0, 1),
+    ]
+    assert len(visual.calls) == 5
+    assert all(
+        len(call["messages"][0]["content"]) == 3
+        for call in visual.calls[1:]
+    )
+    assert [
+        item["status"]
+        for item in tool.single_frame_retry_diagnostics["refined"]
+    ] == [
+        "single_frame_retry_success"
+    ] * 4
+    assert tool.observation_parse_diagnostics["refined"][
+        "single_frame_retry_attempts"
+    ] == 4
+    assert tool.observation_parse_diagnostics["refined"][
+        "single_frame_retry_successes"
+    ] == 4
+    assert tool.observation_parse_diagnostics["refined"][
+        "single_frame_retry_failures"
+    ] == 0
+    assert tool.observation_parse_diagnostics["refined"][
+        "missing_observation_count"
+    ] == 0
+
+
+def test_refined_single_frame_retry_is_hard_capped(monkeypatch, tmp_path):
+    monkeypatch.setattr(video_module, "REFINED_SINGLE_FRAME_RETRY_LIMIT", 2)
+    frames = make_frames(tmp_path, [80.0, 81.0, 82.0, 83.0])
+    visual = FakeClient([
+        json.dumps({"observations": []}),
+        observation_json([80.0], [1]),
+        observation_json([81.0], [1]),
+    ])
+    tool = AnalyzeYouTubeVideoTool(lambda: visual)
+    tool.refinement_diagnostics = [{
+        "candidate_timestamp": 75.35,
+        "start": 60.0,
+        "end": 90.0,
+    }]
+
+    observations = tool._observe_frames(
+        frames,
+        build_video_counting_plan("maximum bird species visible at once"),
+        "refined",
+    )
+
+    assert len(visual.calls) == 3
+    assert len(tool.single_frame_retry_diagnostics["refined"]) == 2
+    assert tool.observation_parse_diagnostics["refined"][
+        "missing_observation_count"
+    ] == 2
+    assert tool.observation_parse_diagnostics["refined"][
+        "single_frame_retry_capped"
+    ] is True
+
+
+def test_refined_retry_order_is_global_not_chronological(monkeypatch, tmp_path):
+    monkeypatch.setattr(video_module, "REFINED_SINGLE_FRAME_RETRY_LIMIT", 3)
+    timestamps = [float(value) for value in range(0, 90)]
+    frames = make_frames(tmp_path, timestamps)
+    visual = FakeClient(
+        [json.dumps({"observations": []})] * 23
+        + [observation_json([0.0], [1])] * 3
+    )
+    tool = AnalyzeYouTubeVideoTool(lambda: visual)
+    tool.refinement_diagnostics = [{
+        "candidate_timestamp": 75.35,
+        "start": 60.0,
+        "end": 90.0,
+    }]
+
+    tool._observe_frames(
+        frames,
+        build_video_counting_plan("maximum bird species visible at once"),
+        "refined",
+    )
+
+    assert [
+        item["timestamp"]
+        for item in tool.single_frame_retry_diagnostics["refined"]
+    ] == [75.0, 74.0, 76.0]
 
 
 def test_batch_diagnostics_distinguish_empty_parse_and_request_failures(tmp_path):
