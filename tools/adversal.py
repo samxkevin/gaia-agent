@@ -56,15 +56,33 @@ class AdversalEvidence:
 
 
 def _result_text(result: Any) -> str:
+    """Return a stable textual view of both MCP text and structured results."""
+    parts: list[str] = []
+
+    for attribute in ("structured_content", "structuredContent"):
+        value = getattr(result, attribute, None)
+        if value is not None:
+            try:
+                parts.append(json.dumps(value, ensure_ascii=False))
+            except (TypeError, ValueError):
+                parts.append(str(value))
+
     for attribute in ("data", "content"):
         value = getattr(result, attribute, None)
         if isinstance(value, str):
-            return value
-        if isinstance(value, list):
-            parts = [getattr(item, "text", None) for item in value]
-            joined = "\n".join(item for item in parts if isinstance(item, str))
-            if joined:
-                return joined
+            parts.append(value)
+        elif isinstance(value, list):
+            content_parts = [
+                getattr(item, "text", None)
+                for item in value
+            ]
+            parts.extend(
+                item for item in content_parts
+                if isinstance(item, str)
+            )
+
+    if parts:
+        return "\n".join(parts)
     return str(result)
 
 
