@@ -154,12 +154,17 @@ def test_missing_refined_observations_are_retried_as_single_frames(tmp_path):
     frames = make_frames(tmp_path, [80.0, 81.0, 82.0, 83.0])
     visual = FakeClient([
         json.dumps({"observations": []}),
+    ])
+    verifier = FakeClient([
         observation_json([80.0], [1]),
         observation_json([81.0], [1]),
         observation_json([82.0], [3]),
         observation_json([83.0], [1]),
     ])
-    tool = AnalyzeYouTubeVideoTool(lambda: visual)
+    tool = AnalyzeYouTubeVideoTool(
+        lambda: visual,
+        verification_client_factory=lambda: verifier,
+    )
     tool.refinement_diagnostics = [{
         "candidate_timestamp": 75.35,
         "start": 60.0,
@@ -177,10 +182,11 @@ def test_missing_refined_observations_are_retried_as_single_frames(tmp_path):
         (82.0, 3),
         (83.0, 1),
     ]
-    assert len(visual.calls) == 5
+    assert len(visual.calls) == 1
+    assert len(verifier.calls) == 4
     assert all(
-        len(call["messages"][0]["content"]) == 3
-        for call in visual.calls[1:]
+        len(call["messages"][0]["content"]) == 2
+        for call in verifier.calls
     )
     assert [
         item["status"]
