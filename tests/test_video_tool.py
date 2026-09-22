@@ -213,10 +213,15 @@ def test_refined_single_frame_retry_is_hard_capped(monkeypatch, tmp_path):
     frames = make_frames(tmp_path, [80.0, 81.0, 82.0, 83.0])
     visual = FakeClient([
         json.dumps({"observations": []}),
-        observation_json([80.0], [1]),
-        observation_json([81.0], [1]),
     ])
-    tool = AnalyzeYouTubeVideoTool(lambda: visual)
+    verifier = FakeClient([
+        "not json",
+        "not json",
+    ])
+    tool = AnalyzeYouTubeVideoTool(
+        lambda: visual,
+        verification_client_factory=lambda: verifier,
+    )
     tool.refinement_diagnostics = [{
         "candidate_timestamp": 75.35,
         "start": 60.0,
@@ -229,7 +234,8 @@ def test_refined_single_frame_retry_is_hard_capped(monkeypatch, tmp_path):
         "refined",
     )
 
-    assert len(visual.calls) == 3
+    assert len(visual.calls) == 1
+    assert len(verifier.calls) == 2
     assert len(tool.single_frame_retry_diagnostics["refined"]) == 2
     assert tool.observation_parse_diagnostics["refined"][
         "missing_observation_count"
@@ -243,11 +249,12 @@ def test_refined_retry_order_is_global_not_chronological(monkeypatch, tmp_path):
     monkeypatch.setattr(video_module, "REFINED_SINGLE_FRAME_RETRY_LIMIT", 3)
     timestamps = [float(value) for value in range(0, 90)]
     frames = make_frames(tmp_path, timestamps)
-    visual = FakeClient(
-        [json.dumps({"observations": []})] * 23
-        + [observation_json([0.0], [1])] * 3
+    visual = FakeClient([json.dumps({"observations": []})] * 23)
+    verifier = FakeClient([observation_json([0.0], [1])] * 3)
+    tool = AnalyzeYouTubeVideoTool(
+        lambda: visual,
+        verification_client_factory=lambda: verifier,
     )
-    tool = AnalyzeYouTubeVideoTool(lambda: visual)
     tool.refinement_diagnostics = [{
         "candidate_timestamp": 75.35,
         "start": 60.0,
@@ -260,6 +267,8 @@ def test_refined_retry_order_is_global_not_chronological(monkeypatch, tmp_path):
         "refined",
     )
 
+    assert len(visual.calls) == 23
+    assert len(verifier.calls) == 3
     assert [
         item["timestamp"]
         for item in tool.single_frame_retry_diagnostics["refined"]
