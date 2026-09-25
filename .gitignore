@@ -12,3 +12,4 @@ env/
 .gaia_debug_attachments/
 .gaia_debug_runs/
 .adversal_gaia/
+.gaia_cache/
