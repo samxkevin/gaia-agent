@@ -63,18 +63,28 @@ def get_chat_routes() -> list[Route]:
     ]
 
     routes = []
+    seen = set()
+
     for model_slot, model_id in model_pairs:
         if not model_id:
             continue
+
         for key_slot, api_key in key_pairs:
-            if api_key:
-                routes.append(
-                    Route(
-                        key_slot=key_slot,
-                        model_id=model_id,
-                        api_key=api_key,
-                    )
+            if not api_key:
+                continue
+
+            identity = (api_key, model_id)
+            if identity in seen:
+                continue
+
+            seen.add(identity)
+            routes.append(
+                Route(
+                    key_slot=key_slot,
+                    model_id=model_id,
+                    api_key=api_key,
                 )
+            )
 
     if not routes:
         raise RuntimeError(
