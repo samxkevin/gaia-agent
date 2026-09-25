@@ -241,19 +241,31 @@ class AnalyzeYouTubeVideoTool(Tool):
             "-o",
             template,
         ]
-        client_attempts = (
-            (),
-            ("--extractor-args", "youtube:player_client=web_embedded"),
-            ("--extractor-args", "youtube:player_client=tv"),
-        )
+        video_id_match = re.search(r"(?:v=|youtu\.be/|youtube\.com/embed/)([A-Za-z0-9_-]{6,})", url)
+        video_id = video_id_match.group(1) if video_id_match else None
+        attempts = [
+            (url, ()),
+            (url, ("--extractor-args", "youtube:player_client=web_embedded")),
+            (url, ("--extractor-args", "youtube:player_client=tv_embedded")),
+            (url, ("--extractor-args", "youtube:player_client=android_vr")),
+            (url, ("--extractor-args", "youtube:player_client=web_safari")),
+        ]
+        if video_id:
+            attempts.insert(
+                2,
+                (
+                    f"https://www.youtube.com/embed/{video_id}",
+                    ("--extractor-args", "youtube:player_client=web_embedded"),
+                ),
+            )
         errors = []
-        for extra_args in client_attempts:
+        for candidate_url, extra_args in attempts:
             for path in workdir.glob("video.*"):
                 if path.is_file():
                     path.unlink()
             try:
                 subprocess.run(
-                    base_command + list(extra_args) + [url],
+                    base_command + list(extra_args) + [candidate_url],
                     check=True,
                     capture_output=True,
                     text=True,
@@ -267,8 +279,8 @@ class AnalyzeYouTubeVideoTool(Tool):
             if files:
                 return files[0]
             errors.append("yt-dlp completed without producing a video file")
-        detail = " | ".join(errors[-3:])
-        raise RuntimeError(f"yt-dlp failed across available YouTube clients: {detail}")
+        detail = " | ".join(errors[-5:])
+        raise RuntimeError(f"yt-dlp failed across available YouTube routes: {detail}")
 
     def _duration(self, video: Path) -> float:
         from imageio_ffmpeg import count_frames_and_secs
