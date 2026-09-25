@@ -1118,7 +1118,6 @@ Timestamp: {candidate.timestamp:.3f} seconds. "
                     ),
                 ))
                 continue
-        for group in groups:
             frequencies = {
                 count: sum(item.count == count for item in group)
                 for count in {item.count for item in group}
