@@ -845,8 +845,7 @@ class AnalyzeYouTubeVideoTool(Tool):
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         groups = json.dumps(list(candidate.visible_subjects), ensure_ascii=False)
         prompt = (
-            f"{plan.instruction}
-Timestamp: {candidate.timestamp:.3f} seconds. "
+            f"{plan.instruction}\nTimestamp: {candidate.timestamp:.3f} seconds. "
             "Perform an independent species-identity adjudication using only this exact frame. "
             f"A prior pass proposed these visually distinct groups: {groups}. Treat those labels "
             "only as hypotheses: confirm every group from the image, and do not create visibility "
