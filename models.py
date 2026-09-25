@@ -246,6 +246,7 @@ class FailoverModel(Model):
                     tools_to_call_from=tools_to_call_from,
                     **kwargs,
                 )
+                self._repair_empty_web_search_call(result, messages)
                 result = self._repair_malformed_final_answer(
                     delegate=delegate,
                     result=result,
@@ -270,6 +271,53 @@ class FailoverModel(Model):
         raise RuntimeError(
             "All Cohere model routes failed. " + " | ".join(errors)
         )
+
+    @classmethod
+    def _original_task_text(cls, messages) -> str:
+        for message in messages or []:
+            role = (
+                message.get("role")
+                if isinstance(message, dict)
+                else getattr(message, "role", None)
+            )
+            content = (
+                message.get("content")
+                if isinstance(message, dict)
+                else getattr(message, "content", None)
+            )
+            if role == "user" and isinstance(content, str) and content.strip():
+                return content.strip()
+        return cls._message_text(messages).strip()
+
+    @classmethod
+    def _repair_empty_web_search_call(cls, result, messages):
+        """Fill malformed empty web_search calls with the original task query."""
+        task = cls._original_task_text(messages)
+        if not task:
+            return result
+
+        for call in (result.tool_calls or []):
+            function = getattr(call, "function", None)
+            if not function or function.name != "web_search":
+                continue
+
+            arguments = function.arguments
+            if isinstance(arguments, str):
+                try:
+                    parsed = json.loads(arguments)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                parsed = arguments
+
+            if parsed == {}:
+                function.arguments = json.dumps(
+                    {"query": " ".join(task.split())},
+                    ensure_ascii=False,
+                )
+
+        return result
+
 
     @staticmethod
     def _find_final_answer_tool(tools):
