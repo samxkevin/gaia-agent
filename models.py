@@ -241,7 +241,7 @@ class FailoverModel(Model):
                 _wait_for_cohere_request()
                 result = delegate.generate(
                     messages,
-                    stop_sequences=stop_sequences,
+                    stop_sequences=[],
                     response_format=response_format,
                     tools_to_call_from=tools_to_call_from,
                     **kwargs,
@@ -526,7 +526,7 @@ class FailoverModel(Model):
             _wait_for_cohere_request()
             repaired = delegate.generate(
                 repair_messages,
-                stop_sequences=stop_sequences,
+                stop_sequences=[],
                 response_format=response_format,
                 tools_to_call_from=[final_answer_tool],
                 **kwargs,
