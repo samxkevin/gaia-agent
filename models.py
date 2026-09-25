@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from config import (
     COHERE_PRIMARY_MODEL,
     COHERE_PRIMARY_TRANSCRIPTION_MODEL,
     COHERE_VISION_MODEL,
+    COHERE_REQUEST_DELAY_SECONDS,
     FAILOVER_ATTEMPTS,
     FAILOVER_COOLDOWN_SECONDS,
     MODEL_MAX_RETRIES,
@@ -29,6 +31,25 @@ class Route:
     key_slot: str
     model_id: str
     api_key: str
+
+
+_cohere_rate_lock = threading.Lock()
+_last_cohere_request_at = 0.0
+
+
+def _wait_for_cohere_request():
+    global _last_cohere_request_at
+
+    with _cohere_rate_lock:
+        now = time.monotonic()
+        wait = COHERE_REQUEST_DELAY_SECONDS - (
+            now - _last_cohere_request_at
+        )
+
+        if wait > 0:
+            time.sleep(wait)
+
+        _last_cohere_request_at = time.monotonic()
 
 
 def get_chat_routes() -> list[Route]:
@@ -207,6 +228,7 @@ class FailoverModel(Model):
             self.total_attempts += 1
             try:
                 delegate = self._build_model(route)
+                _wait_for_cohere_request()
                 result = delegate.generate(
                     messages,
                     stop_sequences=stop_sequences,
@@ -404,6 +426,7 @@ class FailoverModel(Model):
             }
         ]
         try:
+            _wait_for_cohere_request()
             repaired = delegate.generate(
                 repair_messages,
                 stop_sequences=stop_sequences,
@@ -509,6 +532,7 @@ class CohereFailoverClient:
                     route.api_key,
                     log_warning_experimental_features=False,
                 )
+                _wait_for_cohere_request()
                 response = client.chat(
                     model=route.model_id,
                     **kwargs,
@@ -546,6 +570,7 @@ class CohereFailoverClient:
                     log_warning_experimental_features=False,
                 )
                 with open(file_path, "rb") as audio_file:
+                    _wait_for_cohere_request()
                     response = client.audio.transcriptions.create(
                         model=route.model_id,
                         language=language,
