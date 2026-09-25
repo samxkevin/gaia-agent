@@ -1,3 +1,5 @@
+import hashlib
+import os
 from pathlib import Path
 
 from smolagents import (
@@ -31,6 +33,98 @@ ROOT = Path(__file__).resolve().parent
 SYSTEM_PROMPT = (ROOT / "prompts" / "gaia_system.txt").read_text(
     encoding="utf-8"
 )
+
+ANSWER_CACHE_VERSION = "1"
+ANSWER_CACHE_ENABLED = os.getenv(
+    "GAIA_CACHE_ENABLED", "true"
+).strip().lower() not in {"0", "false", "no", "off"}
+ANSWER_CACHE_DIR = Path(
+    os.getenv("GAIA_CACHE_DIR", str(ROOT / ".gaia_cache"))
+)
+
+
+def _attachment_digest(attachment_path: str | None) -> str:
+    if not attachment_path:
+        return "none"
+
+    path = Path(attachment_path)
+    if not path.is_file():
+        return "missing"
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _answer_cache_key(question: str, attachment_path: str | None) -> str:
+    normalized_question = " ".join(question.split())
+    prompt_digest = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
+    material = "\n".join(
+        [
+            ANSWER_CACHE_VERSION,
+            normalized_question,
+            _attachment_digest(attachment_path),
+            prompt_digest,
+            str(MAX_AGENT_STEPS),
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _load_cached_answer(question: str, attachment_path: str | None):
+    if not ANSWER_CACHE_ENABLED:
+        return None
+
+    path = ANSWER_CACHE_DIR / f"{_answer_cache_key(question, attachment_path)}.txt"
+    try:
+        answer = path.read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, OSError):
+        return None
+
+    return answer or None
+
+
+def _is_cacheable_answer(answer: str) -> bool:
+    if not answer or not answer.strip():
+        return False
+
+    lowered = answer.lower()
+    error_markers = (
+        "agentgenerationerror",
+        "all cohere model routes failed",
+        "error in generating final llm output",
+        "no_valid_response_generated",
+        "no_tool_call_or_response_generated",
+        "unprocessableentityerror",
+        "i was unable to",
+        "i am unable to",
+        "i'm unable to",
+        "i could not",
+        "i couldn't",
+        "cannot determine",
+        "unable to determine",
+    )
+    return not any(marker in lowered for marker in error_markers)
+
+
+def _save_cached_answer(
+    question: str,
+    attachment_path: str | None,
+    answer: str,
+) -> None:
+    if not ANSWER_CACHE_ENABLED or not _is_cacheable_answer(answer):
+        return
+
+    try:
+        ANSWER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = ANSWER_CACHE_DIR / f"{_answer_cache_key(question, attachment_path)}.txt"
+        temp_path = path.with_name(path.name + ".tmp")
+        temp_path.write_text(answer.strip(), encoding="utf-8")
+        temp_path.replace(path)
+    except OSError:
+        pass
 
 
 def create_model():
@@ -125,6 +219,11 @@ def clean_answer(value) -> str:
 
 
 def solve(question: str, attachment_path: str | None = None, debug: bool = False):
+    if not debug:
+        cached_answer = _load_cached_answer(question, attachment_path)
+        if cached_answer is not None:
+            return cached_answer
+
     agent = create_agent(question)
 
     if attachment_path:
@@ -137,6 +236,13 @@ def solve(question: str, attachment_path: str | None = None, debug: bool = False
 
     result = agent.run(question)
     answer = clean_answer(result.output if hasattr(result, "output") else result)
+
+    if not debug:
+        _save_cached_answer(
+            question=question.split("\n\nA local GAIA attachment is available at:", 1)[0],
+            attachment_path=attachment_path,
+            answer=answer,
+        )
 
     if debug:
         return answer, result, agent.model
