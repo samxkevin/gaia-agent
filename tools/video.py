@@ -217,16 +217,58 @@ class AnalyzeYouTubeVideoTool(Tool):
 
     def _download(self, url: str, workdir: Path) -> Path:
         from imageio_ffmpeg import get_ffmpeg_exe
+
         runtime = find_javascript_runtime()
         if runtime is None:
             raise RuntimeError("No yt-dlp JavaScript runtime found (deno, node, quickjs, or bun).")
         runtime_name, runtime_path = runtime
         template = str(workdir / "video.%(ext)s")
-        subprocess.run([sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings", "--ffmpeg-location", get_ffmpeg_exe(), "--js-runtimes", f"{runtime_name}:{runtime_path}", "-f", "bestvideo[height<=720]/best[height<=720]/worst", "--merge-output-format", "mp4", "-o", template, url], check=True, capture_output=True, text=True, timeout=300)
-        files = [p for p in workdir.glob("video.*") if p.is_file()]
-        if not files:
-            raise RuntimeError("yt-dlp produced no video file")
-        return files[0]
+        base_command = [
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--no-playlist",
+            "--no-warnings",
+            "--force-ipv4",
+            "--ffmpeg-location",
+            get_ffmpeg_exe(),
+            "--js-runtimes",
+            f"{runtime_name}:{runtime_path}",
+            "-f",
+            "bestvideo[height<=720]/best[height<=720]/worst",
+            "--merge-output-format",
+            "mp4",
+            "-o",
+            template,
+        ]
+        client_attempts = (
+            (),
+            ("--extractor-args", "youtube:player_client=web_embedded"),
+            ("--extractor-args", "youtube:player_client=tv"),
+        )
+        errors = []
+        for extra_args in client_attempts:
+            for path in workdir.glob("video.*"):
+                if path.is_file():
+                    path.unlink()
+            try:
+                subprocess.run(
+                    base_command + list(extra_args) + [url],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or exc.stdout or "").strip()
+                errors.append(detail[-1200:] if detail else f"exit status {exc.returncode}")
+                continue
+            files = [p for p in workdir.glob("video.*") if p.is_file()]
+            if files:
+                return files[0]
+            errors.append("yt-dlp completed without producing a video file")
+        detail = " | ".join(errors[-3:])
+        raise RuntimeError(f"yt-dlp failed across available YouTube clients: {detail}")
 
     def _duration(self, video: Path) -> float:
         from imageio_ffmpeg import count_frames_and_secs
