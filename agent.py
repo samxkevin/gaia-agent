@@ -186,7 +186,7 @@ def create_agent(question: str | None = None):
             ExtractYouTubeIdTool(),
             YouTubeTranscriptTool(),
         ]
-        max_steps = min(MAX_AGENT_STEPS, 10)
+        max_steps = MAX_AGENT_STEPS
 
     return ToolCallingAgent(
         tools=tools,
