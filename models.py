@@ -247,6 +247,7 @@ class FailoverModel(Model):
                     **kwargs,
                 )
                 self._repair_empty_web_search_call(result, messages)
+                self._repair_pdf_webpage_call(result, messages)
                 result = self._repair_malformed_final_answer(
                     delegate=delegate,
                     result=result,
@@ -271,6 +272,44 @@ class FailoverModel(Model):
         raise RuntimeError(
             "All Cohere model routes failed. " + " | ".join(errors)
         )
+
+    @classmethod
+    def _repair_pdf_webpage_call(cls, result, messages):
+        """Convert unusable remote PDF webpage calls into targeted web searches."""
+        task = cls._original_task_text(messages)
+        if not task:
+            return result
+
+        for call in (result.tool_calls or []):
+            function = getattr(call, "function", None)
+            if not function or function.name != "visit_webpage":
+                continue
+
+            arguments = function.arguments
+            if isinstance(arguments, str):
+                try:
+                    parsed = json.loads(arguments)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                parsed = arguments
+
+            if not isinstance(parsed, dict):
+                continue
+
+            url = parsed.get("url", "")
+            if not isinstance(url, str) or ".pdf" not in url.lower():
+                continue
+
+            function.name = "web_search"
+            function.arguments = json.dumps(
+                {
+                    "query": f"{' '.join(task.split())} {url}"
+                },
+                ensure_ascii=False,
+            )
+
+        return result
 
     @classmethod
     def _original_task_text(cls, messages) -> str:
