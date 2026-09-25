@@ -801,3 +801,94 @@ def test_fractional_refinement_region_keeps_boundary_and_aligns_whole_seconds(
     assert diagnostic["start"] == region_start
     assert diagnostic["end"] == 3 * (120.56 / 4)
     assert diagnostic["sampling_offsets"] == [region_start, 61.0]
+
+
+def test_species_adjudication_is_targeted_and_preserves_uncertain_distinctness(tmp_path):
+    frame = make_frames(tmp_path, [82.0])[0]
+    candidate = FrameObservation(
+        82.0,
+        ("adult penguin", "penguin chicks", "brown seabird"),
+        ("penguin", "seabird"),
+        2,
+        .9,
+        ("exact identities uncertain",),
+        frame_path=str(frame[1]),
+    )
+    species_plan = build_video_counting_plan("maximum bird species visible at once")
+    selected = AnalyzeYouTubeVideoTool._select_species_adjudication_candidates(
+        [candidate], species_plan
+    )
+    assert selected == [candidate]
+    assert AnalyzeYouTubeVideoTool._select_species_adjudication_candidates(
+        [candidate], build_video_counting_plan("maximum birds visible at once")
+    ) == []
+
+    verifier = FakeClient([json.dumps({"observations": [{
+        "timestamp": 999,
+        "visible_subjects": ["morphology A", "morphology B", "morphology C"],
+        "species": [
+            "distinct penguin species A (exact identity uncertain)",
+            "distinct penguin species B (exact identity uncertain)",
+            "distinct seabird species C (exact identity uncertain)",
+        ],
+        "count": 3,
+        "confidence": .7,
+        "uncertain": ["exact species names"],
+        "note": "three visibly distinct morphologies",
+    }]})])
+    tool = AnalyzeYouTubeVideoTool(
+        lambda: FakeClient([]), verification_client_factory=lambda: verifier
+    )
+    result = tool._adjudicate_species_candidates(selected, species_plan)
+    assert [(item.timestamp, item.count, item.pass_name) for item in result] == [
+        (82.0, 3, "adjudication")
+    ]
+    assert result[0].species[0].endswith("(exact identity uncertain)")
+    assert tool.species_adjudication_diagnostics == [{
+        "timestamp": 82.0,
+        "status": "adjudicated",
+    }]
+
+
+def test_species_adjudication_prompt_neither_splits_nor_merges_age_groups(tmp_path):
+    frame = make_frames(tmp_path, [12.0])[0]
+    candidate = FrameObservation(
+        12.0,
+        ("adult penguin", "penguin chick"),
+        ("penguin",),
+        1,
+        .5,
+        (),
+        frame_path=str(frame[1]),
+    )
+    prompt = AnalyzeYouTubeVideoTool._species_adjudication_messages(
+        build_video_counting_plan("maximum bird species visible at once"),
+        candidate,
+        frame[1],
+    )[0]["content"][0]["text"]
+    assert "Do not split adults and chicks merely" in prompt
+    assert "do not merge them merely" in prompt
+    assert "Broad labels such as penguin" in prompt
+    assert "Exact names are optional" in prompt
+    assert "do not create visibility" in prompt
+    assert "using only this exact frame" in prompt
+
+
+def test_adjudication_is_authoritative_only_at_its_same_timestamp():
+    original = FrameObservation(
+        10.0, (), ("a", "b"), 2, .99, (), pass_name="verification"
+    )
+    adjudicated = FrameObservation(
+        10.0, (), ("a", "b", "distinct species C"), 3, .65,
+        ("exact identity uncertain",), pass_name="adjudication"
+    )
+    unrelated = FrameObservation(
+        11.0, (), ("a",), 1, .95, (), pass_name="verification"
+    )
+    reconciled = AnalyzeYouTubeVideoTool._reconcile_observations(
+        [original, adjudicated, unrelated]
+    )
+    assert [(item.timestamp, item.count, item.pass_name) for item in reconciled] == [
+        (10.0, 3, "adjudication"),
+        (11.0, 1, "verification"),
+    ]

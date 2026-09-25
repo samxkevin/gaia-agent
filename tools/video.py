@@ -26,6 +26,7 @@ REFINE_CANDIDATES = 4
 REFINE_REGION_INTERVAL_SECONDS = 1.0
 CANDIDATE_MIN_SEPARATION_SECONDS = 5.0
 VERIFICATION_LIMIT = 4
+SPECIES_ADJUDICATION_LIMIT = 4
 VISION_BATCH_SIZE = 4
 REFINED_SINGLE_FRAME_RETRY_LIMIT = 50
 MAX_FRAME_WIDTH = 1280
@@ -142,6 +143,7 @@ class AnalyzeYouTubeVideoTool(Tool):
         self.coarse_diagnostics: dict = {}
         self.refinement_diagnostics: list[dict] = []
         self.verification_diagnostics: list[dict] = []
+        self.species_adjudication_diagnostics: list[dict] = []
         self.single_frame_retry_diagnostics: dict[str, list[dict]] = {}
 
     def forward(self, url: str, question: str, max_frames: int | None = None) -> str:
@@ -195,6 +197,18 @@ class AnalyzeYouTubeVideoTool(Tool):
                         )
                     except Exception:
                         # Independent verification is bounded and best effort.
+                        pass
+                    try:
+                        adjudication_candidates = self._select_species_adjudication_candidates(
+                            self._merge_observations(observations), plan
+                        )
+                        observations.extend(
+                            self._adjudicate_species_candidates(
+                                adjudication_candidates, plan
+                            )
+                        )
+                    except Exception:
+                        # Identity adjudication is bounded and must not erase evidence.
                         pass
                 self.last_observations = observations
                 return self._synthesize(observations, plan, duration, len(coarse))
@@ -779,6 +793,147 @@ class AnalyzeYouTubeVideoTool(Tool):
         return verified
 
     @staticmethod
+    def _select_species_adjudication_candidates(
+        observations: list[FrameObservation], plan: VideoCountingPlan
+    ) -> list[FrameObservation]:
+        """Select a few maximum-adjacent frames with unresolved group identity."""
+        if not plan.distinct_categories or not observations:
+            return []
+        maximum = max(item.count for item in observations)
+        broad_terms = {
+            "animal", "bird", "birds", "penguin", "penguins", "seabird",
+            "seabirds", "unknown", "unidentified",
+        }
+
+        def broad_label(label: str) -> bool:
+            words = set(re.findall(r"[a-z]+", label.lower()))
+            return bool(words & broad_terms) and len(words) <= 3
+
+        eligible = [
+            item for item in observations
+            if item.frame_path
+            and item.count >= maximum - 1
+            and (
+                len(item.visible_subjects) > len(item.species)
+                or bool(item.uncertain)
+                or any(broad_label(label) for label in item.species)
+            )
+        ]
+        ranked = sorted(
+            eligible,
+            key=lambda item: (
+                -item.count,
+                -(len(item.visible_subjects) - len(item.species)),
+                -bool(item.uncertain),
+                -item.confidence,
+                item.timestamp,
+            ),
+        )
+        selected = []
+        for item in ranked:
+            if any(abs(item.timestamp - prior.timestamp) <= 0.125 for prior in selected):
+                continue
+            selected.append(item)
+            if len(selected) >= SPECIES_ADJUDICATION_LIMIT:
+                break
+        return selected
+
+    @staticmethod
+    def _species_adjudication_messages(
+        plan: VideoCountingPlan, candidate: FrameObservation, path: Path
+    ) -> list[dict]:
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        groups = json.dumps(list(candidate.visible_subjects), ensure_ascii=False)
+        prompt = (
+            f"{plan.instruction}
+Timestamp: {candidate.timestamp:.3f} seconds. "
+            "Perform an independent species-identity adjudication using only this exact frame. "
+            f"A prior pass proposed these visually distinct groups: {groups}. Treat those labels "
+            "only as hypotheses: confirm every group from the image, and do not create visibility "
+            "from the labels or any external text. Inspect each visually distinct group independently "
+            "and decide whether groups are the same biological species or different species. Broad "
+            "labels such as penguin, bird, or seabird are not species identities. Do not split adults "
+            "and chicks merely because they are different life stages, and do not merge them merely "
+            "because both share a broad category. Compare plumage pattern, facial markings, head and "
+            "bill shape, body proportions, coloration, and other visible diagnostic features. Explicitly "
+            "compare plausible alternatives when a group could be a different species. Do not invent a "
+            "species to increase the count. Do not collapse visibly biologically distinct groups merely "
+            "because an exact name is uncertain: use a unique label such as 'distinct species A (exact "
+            "identity uncertain)' when distinctness is visually supported. Exact names are optional, but "
+            "each species entry must represent one visibly supported biological species. The count must "
+            "equal the number of distinct species visible in this frame. Never use nearby timestamps. "
+            "Return ONLY a JSON object containing an observations array with one object: timestamp, "
+            "visible_subjects, species, count, confidence, uncertain, and note explaining the visible "
+            "species-level comparison."
+        )
+        return [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{encoded}",
+                        "detail": "high",
+                    },
+                },
+            ],
+        }]
+
+    def _adjudicate_species_candidates(
+        self,
+        candidates: list[FrameObservation],
+        plan: VideoCountingPlan,
+    ) -> list[FrameObservation]:
+        """Resolve species identity for a bounded set of ambiguous candidate frames."""
+        self.species_adjudication_diagnostics = []
+        if not plan.distinct_categories or not candidates:
+            return []
+        adjudicated = []
+        try:
+            client = self.verification_client_factory()
+        except Exception as exc:
+            self.species_adjudication_diagnostics.append({
+                "timestamp": None,
+                "status": "failed",
+                "stage": "initialization",
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+            })
+            return []
+        for candidate in candidates[:SPECIES_ADJUDICATION_LIMIT]:
+            path = Path(candidate.frame_path)
+            diagnostic = {"timestamp": candidate.timestamp, "status": "pending"}
+            if not path.is_file():
+                diagnostic.update(status="skipped", reason="candidate frame unavailable")
+                self.species_adjudication_diagnostics.append(diagnostic)
+                continue
+            try:
+                response = self._chat_observations(
+                    client,
+                    messages=self._species_adjudication_messages(plan, candidate, path),
+                )
+                parsed = self._parse_observations(
+                    self._response_text(response),
+                    [(candidate.timestamp, path)],
+                    "adjudication",
+                )
+                if parsed:
+                    adjudicated.extend(parsed)
+                    diagnostic["status"] = "adjudicated"
+                else:
+                    diagnostic.update(status="failed", reason="malformed structured response")
+            except Exception as exc:
+                diagnostic.update(
+                    status="failed",
+                    stage="request_or_parse",
+                    exception_type=type(exc).__name__,
+                    exception_message=str(exc),
+                )
+            self.species_adjudication_diagnostics.append(diagnostic)
+        return adjudicated
+
+    @staticmethod
     def _coverage_diagnostics(
         observations: list[FrameObservation], requested_frames: int
     ) -> dict:
@@ -943,7 +1098,26 @@ class AnalyzeYouTubeVideoTool(Tool):
                 groups[-1].append(item)
 
         reconciled = []
-        source_rank = {"coarse": 0, "refined": 1, "verification": 2}
+        source_rank = {
+            "coarse": 0,
+            "refined": 1,
+            "verification": 2,
+            "adjudication": 3,
+        }
+        for group in groups:
+            adjudicated = [
+                item for item in group if item.pass_name == "adjudication"
+            ]
+            if adjudicated:
+                reconciled.append(max(
+                    adjudicated,
+                    key=lambda item: (
+                        item.confidence,
+                        len(item.species),
+                        item.count,
+                    ),
+                ))
+                continue
         for group in groups:
             frequencies = {
                 count: sum(item.count == count for item in group)
@@ -976,6 +1150,7 @@ class AnalyzeYouTubeVideoTool(Tool):
         coarse = [item for item in observations if item.pass_name == "coarse"]
         refined = [item for item in observations if item.pass_name == "refined"]
         verification = [item for item in observations if item.pass_name == "verification"]
+        adjudication = [item for item in observations if item.pass_name == "adjudication"]
         reconciled = self._reconcile_observations(observations)
         maximum = max(item.count for item in reconciled)
         strongest = [item for item in reconciled if item.count == maximum]
@@ -1020,6 +1195,10 @@ class AnalyzeYouTubeVideoTool(Tool):
             "refined_observations": [public(item) for item in refined],
             "verification_observations": [public(item) for item in verification],
             "verification_diagnostics": self.verification_diagnostics,
+            "species_adjudication_observations": [
+                public(item) for item in adjudication
+            ],
+            "species_adjudication_diagnostics": self.species_adjudication_diagnostics,
             "programmatic_maximum_observed": maximum,
             "same_frame_candidates": [public(item) for item in strongest],
         }
