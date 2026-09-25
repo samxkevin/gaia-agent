@@ -56,4 +56,4 @@ jobs:
           fi
 
       - name: Run first GAIA question
-        run: python -m evaluation.debug --index 0 --expected 3
+        run: python -m evaluation.debug --index 1 --expected 3
