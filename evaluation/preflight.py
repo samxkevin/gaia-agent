@@ -2,7 +2,12 @@ import importlib.util
 import os
 
 from evaluation.client import fetch_questions
-from config import COHERE_FALLBACK_MODEL, COHERE_BASE_URL, MODEL_TIMEOUT_SECONDS
+from config import (
+    COHERE_FALLBACK_MODEL,
+    COHERE_BASE_URL,
+    COHERE_PRIMARY_MODEL,
+    MODEL_TIMEOUT_SECONDS,
+)
 from models import get_chat_routes
 from tools.video import find_javascript_runtime
 
@@ -27,6 +32,16 @@ def main():
         missing.append("COHERE_FALLBACK_API_KEY")
     if COHERE_FALLBACK_MODEL == "command-a-03-2025":
         missing.append("COHERE_FALLBACK_MODEL is still the legacy command-a-03-2025")
+    if COHERE_FALLBACK_MODEL.lower() == COHERE_PRIMARY_MODEL.lower():
+        missing.append(
+            "COHERE_FALLBACK_MODEL must differ from COHERE_PRIMARY_MODEL; "
+            "the fallback must provide genuine model diversity"
+        )
+    if COHERE_FALLBACK_MODEL.lower() != "command-a-reasoning-08-2025":
+        missing.append(
+            "COHERE_FALLBACK_MODEL must be command-a-reasoning-08-2025 "
+            "for the GAIA text-agent fallback"
+        )
 
     for module in (
         "smolagents",
@@ -86,6 +101,7 @@ def main():
     print(f"Level: {first['Level']}")
     print(f"Attachment: {first['file_name'] or '<none>'}")
     print(f"Configured chat routes: {len(routes)}")
+    print(f"Primary model: {COHERE_PRIMARY_MODEL}")
     print(f"Fallback model: {COHERE_FALLBACK_MODEL}")
 
     route_errors = []
