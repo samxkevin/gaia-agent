@@ -519,7 +519,7 @@ class FailoverModel(Model):
             role = role_value(message)
             text_content = content_text(message)
 
-            if role == "tool-call":
+            if role in {"tool-call", "tool_call"} or ("tool" in role and "call" in role):
                 calls = cls._parse_serialized_tool_calls(text_content)
                 if not calls:
                     continue
@@ -571,7 +571,7 @@ class FailoverModel(Model):
                 pending_tool_ids = [call["id"] for call in cohere_calls]
                 continue
 
-            if role == "tool-response":
+            if role in {"tool-response", "tool_response"} or ("tool" in role and "response" in role):
                 if not text_content.strip():
                     continue
 
