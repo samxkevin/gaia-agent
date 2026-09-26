@@ -17,10 +17,7 @@ COHERE_PRIMARY_MODEL = os.getenv(
     "COHERE_PRIMARY_MODEL",
     "command-a-plus-05-2026",
 )
-COHERE_FALLBACK_MODEL = os.getenv(
-    "COHERE_FALLBACK_MODEL",
-    "command-a-reasoning-08-2025",
-)
+COHERE_FALLBACK_MODEL = os.getenv("COHERE_FALLBACK_MODEL", "").strip() or "command-a-reasoning-08-2025"
 COHERE_VISION_MODEL = os.getenv(
     "COHERE_VISION_MODEL",
     "command-a-vision-07-2025",
