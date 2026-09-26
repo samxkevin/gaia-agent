@@ -491,7 +491,11 @@ class FailoverModel(Model):
                 if isinstance(message, dict)
                 else getattr(message, "role", None)
             )
-            return str(getattr(role, "value", role))
+            value = getattr(role, "value", role)
+            value = str(value).strip().lower()
+            if value.startswith("messagerole."):
+                value = value.split(".", 1)[1]
+            return value.replace("_", "-")
 
         def content_text(message):
             content = (
@@ -502,10 +506,12 @@ class FailoverModel(Model):
             if isinstance(content, list):
                 parts = []
                 for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        value = item.get("text", "")
-                        if value:
-                            parts.append(str(value))
+                    if isinstance(item, dict):
+                        value = item.get("text", "") if item.get("type") == "text" else ""
+                    else:
+                        value = getattr(item, "text", "") if getattr(item, "type", None) == "text" else ""
+                    if value:
+                        parts.append(str(value))
                 return "\n".join(parts)
             return "" if content is None else str(content)
 
