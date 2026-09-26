@@ -27,7 +27,7 @@ jobs:
           python -c 'import agent; import models; import evaluation.client; import evaluation.debug; print("imports: OK")'
 
       - name: Run regression tests
-        run: python -m pytest -q tests/test_video_tool.py tests/test_adversal.py
+        run: python -m pytest -q tests
 
   live_first_question:
     if: github.event_name == 'workflow_dispatch'
