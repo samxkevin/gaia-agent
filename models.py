@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import threading
@@ -263,26 +264,20 @@ class FailoverModel(Model):
 
                     retry_messages = self._compact_messages_for_retry(messages)
 
-                    try:
-                        result = self._native_cohere_tool_retry(
-                            route=route,
-                            messages=retry_messages,
-                            tools_to_call_from=tools_to_call_from,
-                        )
-                    except Exception:
-                        retry_delegate = self._build_model(
-                            route,
-                            reasoning_effort="none",
-                        )
-                        _wait_for_cohere_request()
-                        result = retry_delegate.generate(
-                            retry_messages,
-                            stop_sequences=[],
-                            response_format=response_format,
-                            tools_to_call_from=tools_to_call_from,
-                            **kwargs,
-                        )
+                    # Cohere's OpenAI-compatible endpoint can return 422 tool
+                    # generation errors even when the same model can produce a
+                    # valid structured call through native V2. Use one strict
+                    # native recovery, then fail over to the next route instead
+                    # of spending another call on the same broken route.
+                    result = self._native_cohere_tool_retry(
+                        route=route,
+                        messages=retry_messages,
+                        tools_to_call_from=tools_to_call_from,
+                    )
 
+                # Recover Python-style "Calling tools: [...]" text before
+                # smolagents attempts to parse it as JSON.
+                self._repair_text_tool_calls(result, tools_to_call_from)
                 self._repair_empty_web_search_call(result, messages)
                 self._repair_pdf_webpage_call(result, messages)
                 result = self._repair_malformed_final_answer(
@@ -326,7 +321,7 @@ class FailoverModel(Model):
 
     @classmethod
     def _native_cohere_tool_retry(cls, *, route, messages, tools_to_call_from):
-        """Retry failed tool generation through Cohere's native V2 API with strict tools."""
+        """Retry failed tool generation through Cohere's native V2 API."""
         import cohere
 
         client = cohere.ClientV2(
@@ -334,6 +329,9 @@ class FailoverModel(Model):
             log_warning_experimental_features=False,
         )
         native_messages = cls._cohere_native_messages(messages)
+        if not native_messages:
+            raise RuntimeError("Cannot perform native Cohere retry without messages.")
+
         native_tools = [get_tool_json_schema(tool) for tool in tools_to_call_from]
 
         _wait_for_cohere_request()
@@ -353,6 +351,8 @@ class FailoverModel(Model):
             if not function:
                 continue
             arguments = getattr(function, "arguments", "{}")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
             tool_calls.append(
                 ChatMessageToolCall(
                     function=ChatMessageToolCallFunction(
@@ -381,48 +381,227 @@ class FailoverModel(Model):
         )
 
     @classmethod
-    def _cohere_native_messages(cls, messages):
-        """Translate smolagents' internal tool messages into Cohere V2 chat messages."""
-        native = []
+    def _parse_serialized_tool_calls(cls, text: str) -> list[dict[str, Any]]:
+        """Parse smolagents textual Calling tools serialization."""
+        if not isinstance(text, str):
+            return []
 
-        for message in messages or []:
+        marker = "calling tools:"
+        lowered = text.lower()
+        marker_index = lowered.find(marker)
+        if marker_index < 0:
+            return []
+
+        payload = text[marker_index + len(marker):].strip()
+        if not payload:
+            return []
+
+        candidates = [payload]
+        list_start = payload.find("[")
+        list_end = payload.rfind("]")
+        if list_start >= 0 and list_end > list_start:
+            candidates.insert(0, payload[list_start:list_end + 1])
+
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError):
+                try:
+                    parsed = ast.literal_eval(candidate)
+                except (ValueError, SyntaxError):
+                    continue
+
+            if isinstance(parsed, dict):
+                if isinstance(parsed.get("tool_calls"), list):
+                    parsed = parsed["tool_calls"]
+                else:
+                    parsed = [parsed]
+
+            if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
+                return parsed
+
+        return []
+
+    @classmethod
+    def _repair_text_tool_calls(cls, result, tools_to_call_from):
+        """Recover structured tool calls serialized as provider text."""
+        if getattr(result, "tool_calls", None) or not tools_to_call_from:
+            return result
+
+        content = getattr(result, "content", None)
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    value = item.get("text", "")
+                    if value:
+                        text_parts.append(str(value))
+            text = "\n".join(text_parts)
+        else:
+            text = "" if content is None else str(content)
+
+        parsed_calls = cls._parse_serialized_tool_calls(text)
+        if not parsed_calls:
+            return result
+
+        allowed_names = {tool.name for tool in tools_to_call_from}
+        recovered = []
+
+        for index, item in enumerate(parsed_calls):
+            function = item.get("function")
+            if not isinstance(function, dict):
+                function = item
+
+            name = function.get("name")
+            if not isinstance(name, str) or name not in allowed_names:
+                return result
+
+            arguments = function.get("arguments", item.get("arguments", {}))
+            if arguments is None:
+                arguments = {}
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+
+            recovered.append(
+                ChatMessageToolCall(
+                    function=ChatMessageToolCallFunction(
+                        name=name,
+                        arguments=arguments,
+                    ),
+                    id=str(item.get("id") or f"recovered_tool_call_{index + 1}"),
+                    type=str(item.get("type") or "function"),
+                )
+            )
+
+        if recovered:
+            result.tool_calls = recovered
+
+        return result
+
+    @classmethod
+    def _cohere_native_messages(cls, messages):
+        """Translate smolagents memory into a valid Cohere V2 tool transcript."""
+        native = []
+        pending_tool_ids: list[str] = []
+        last_assistant = None
+
+        def role_value(message):
             role = (
                 message.get("role")
                 if isinstance(message, dict)
                 else getattr(message, "role", None)
             )
+            return str(getattr(role, "value", role))
+
+        def content_text(message):
             content = (
                 message.get("content")
                 if isinstance(message, dict)
                 else getattr(message, "content", None)
             )
-            role_text = getattr(role, "value", role)
-            role_text = str(role_text)
-
             if isinstance(content, list):
                 parts = []
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "text":
-                        parts.append(str(item.get("text", "")))
-                text_content = "\n".join(p for p in parts if p)
-            else:
-                text_content = "" if content is None else str(content)
+                        value = item.get("text", "")
+                        if value:
+                            parts.append(str(value))
+                return "\n".join(parts)
+            return "" if content is None else str(content)
 
-            mapped_role = {
-                "tool-call": "assistant",
-                "tool-response": "user",
-            }.get(role_text, role_text)
+        for message in messages or []:
+            role = role_value(message)
+            text_content = content_text(message)
 
-            if mapped_role not in {"system", "user", "assistant"}:
-                mapped_role = "user"
+            if role == "tool-call":
+                calls = cls._parse_serialized_tool_calls(text_content)
+                if not calls:
+                    continue
+
+                cohere_calls = []
+                for index, item in enumerate(calls):
+                    function = item.get("function")
+                    if not isinstance(function, dict):
+                        function = item
+
+                    name = function.get("name")
+                    if not isinstance(name, str) or not name.strip():
+                        continue
+
+                    arguments = function.get("arguments", item.get("arguments", {}))
+                    if arguments is None:
+                        arguments = {}
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments, ensure_ascii=False)
+
+                    cohere_calls.append(
+                        {
+                            "id": str(item.get("id") or f"recovered_tool_call_{index + 1}"),
+                            "type": str(item.get("type") or "function"),
+                            "function": {
+                                "name": name,
+                                "arguments": arguments,
+                            },
+                        }
+                    )
+
+                if not cohere_calls:
+                    continue
+
+                if (
+                    last_assistant is not None
+                    and native[last_assistant].get("role") == "assistant"
+                ):
+                    native[last_assistant]["tool_calls"] = cohere_calls
+                else:
+                    native.append(
+                        {
+                            "role": "assistant",
+                            "tool_calls": cohere_calls,
+                        }
+                    )
+                    last_assistant = len(native) - 1
+
+                pending_tool_ids = [call["id"] for call in cohere_calls]
+                continue
+
+            if role == "tool-response":
+                if not text_content.strip():
+                    continue
+
+                if pending_tool_ids:
+                    for call_id in pending_tool_ids:
+                        native.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": [
+                                    {
+                                        "type": "document",
+                                        "document": {"data": text_content},
+                                    }
+                                ],
+                            }
+                        )
+                    pending_tool_ids = []
+                else:
+                    native.append({"role": "user", "content": text_content})
+                last_assistant = None
+                continue
+
+            if role not in {"system", "user", "assistant"}:
+                role = "user"
 
             if not text_content.strip():
                 continue
 
-            if native and native[-1]["role"] == mapped_role:
-                native[-1]["content"] += "\n\n" + text_content
-            else:
-                native.append({"role": mapped_role, "content": text_content})
+            native.append(
+                {
+                    "role": role,
+                    "content": text_content,
+                }
+            )
+            last_assistant = len(native) - 1 if role == "assistant" else None
 
         return native
 
