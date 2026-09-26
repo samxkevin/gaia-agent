@@ -96,3 +96,24 @@ def test_native_retry_preserves_cohere_tool_protocol():
     assert native[3]["tool_call_id"] == "call_1"
     assert native[3]["content"][0]["type"] == "document"
     assert native[3]["content"][0]["document"]["data"] == "Observation:\nresult text"
+
+
+def test_recover_plain_text_final_answer_locally():
+    result = SimpleNamespace(content="80GSFC21M0002", tool_calls=[])
+    messages = [
+        ChatMessage(
+            role=MessageRole.USER,
+            content=[{"type": "text", "text": "Find the award number."}],
+        ),
+        ChatMessage(
+            role=MessageRole.TOOL_RESPONSE,
+            content=[{"type": "text", "text": "Source observation"}],
+        ),
+    ]
+    repaired = FailoverModel._repair_plain_text_final_answer(
+        result=result,
+        messages=messages,
+        final_answer_tool=DummyTool("final_answer"),
+    )
+    assert repaired.tool_calls[0].function.name == "final_answer"
+    assert repaired.tool_calls[0].function.arguments == '{"answer": "80GSFC21M0002"}'
