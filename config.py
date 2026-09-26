@@ -16,8 +16,19 @@ COHERE_API_KEY = os.getenv("COHERE_API_KEY", "") or COHERE_PRIMARY_API_KEY
 COHERE_PRIMARY_MODEL = os.getenv(
     "COHERE_PRIMARY_MODEL",
     "command-a-plus-05-2026",
+).strip() or "command-a-plus-05-2026"
+
+# Never allow an explicitly configured fallback to silently duplicate the
+# primary model. A duplicate route gives us no model diversity and was the
+# configuration that caused the previous 19/20 run to have two A+ routes.
+_requested_fallback_model = os.getenv("COHERE_FALLBACK_MODEL", "").strip()
+COHERE_FALLBACK_MODEL = (
+    _requested_fallback_model
+    if _requested_fallback_model
+    and _requested_fallback_model.lower() != COHERE_PRIMARY_MODEL.lower()
+    else "command-a-reasoning-08-2025"
 )
-COHERE_FALLBACK_MODEL = os.getenv("COHERE_FALLBACK_MODEL", "").strip() or "command-a-reasoning-08-2025"
+
 COHERE_VISION_MODEL = os.getenv(
     "COHERE_VISION_MODEL",
     "command-a-vision-07-2025",
