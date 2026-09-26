@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from smolagents import Model, OpenAIModel, REMOVE_PARAMETER
+from smolagents.models import ChatMessage, MessageRole, ChatMessageToolCall, ChatMessageToolCallFunction, get_tool_json_schema
 
 from config import (
     COHERE_BASE_URL,
@@ -257,22 +258,30 @@ class FailoverModel(Model):
                         **kwargs,
                     )
                 except Exception as exc:
-                    if not self._is_empty_generation_error(exc):
+                    if not self._is_provider_generation_error(exc) or not tools_to_call_from:
                         raise
 
                     retry_messages = self._compact_messages_for_retry(messages)
-                    retry_delegate = self._build_model(
-                        route,
-                        reasoning_effort="none",
-                    )
-                    _wait_for_cohere_request()
-                    result = retry_delegate.generate(
-                        retry_messages,
-                        stop_sequences=[],
-                        response_format=response_format,
-                        tools_to_call_from=tools_to_call_from,
-                        **kwargs,
-                    )
+
+                    try:
+                        result = self._native_cohere_tool_retry(
+                            route=route,
+                            messages=retry_messages,
+                            tools_to_call_from=tools_to_call_from,
+                        )
+                    except Exception:
+                        retry_delegate = self._build_model(
+                            route,
+                            reasoning_effort="none",
+                        )
+                        _wait_for_cohere_request()
+                        result = retry_delegate.generate(
+                            retry_messages,
+                            stop_sequences=[],
+                            response_format=response_format,
+                            tools_to_call_from=tools_to_call_from,
+                            **kwargs,
+                        )
 
                 self._repair_empty_web_search_call(result, messages)
                 self._repair_pdf_webpage_call(result, messages)
@@ -300,6 +309,122 @@ class FailoverModel(Model):
         raise RuntimeError(
             "All Cohere model routes failed. " + " | ".join(errors)
         )
+
+    @staticmethod
+    def _is_provider_generation_error(exc: Exception) -> bool:
+        text = f"{type(exc).__name__}: {exc}".lower()
+        return (
+            "422" in text
+            and (
+                "no_tool_call_or_response_generated" in text
+                or "invalid_tool_generation" in text
+                or "no_valid_response_generated" in text
+                or "no tool calls or response was generated" in text
+                or "no valid response generated" in text
+            )
+        )
+
+    @classmethod
+    def _native_cohere_tool_retry(cls, *, route, messages, tools_to_call_from):
+        """Retry failed tool generation through Cohere's native V2 API with strict tools."""
+        import cohere
+
+        client = cohere.ClientV2(
+            route.api_key,
+            log_warning_experimental_features=False,
+        )
+        native_messages = cls._cohere_native_messages(messages)
+        native_tools = [get_tool_json_schema(tool) for tool in tools_to_call_from]
+
+        _wait_for_cohere_request()
+        response = client.chat(
+            model=route.model_id,
+            messages=native_messages,
+            tools=native_tools,
+            tool_choice="REQUIRED",
+            strict_tools=True,
+            temperature=0,
+            max_tokens=4096,
+        )
+
+        tool_calls = []
+        for call in (getattr(response.message, "tool_calls", None) or []):
+            function = getattr(call, "function", None)
+            if not function:
+                continue
+            arguments = getattr(function, "arguments", "{}")
+            tool_calls.append(
+                ChatMessageToolCall(
+                    function=ChatMessageToolCallFunction(
+                        name=str(getattr(function, "name", "")),
+                        arguments=arguments,
+                    ),
+                    id=str(getattr(call, "id", "")),
+                    type=str(getattr(call, "type", "function")),
+                )
+            )
+
+        content_parts = []
+        for block in (getattr(response.message, "content", None) or []):
+            text = getattr(block, "text", None)
+            if text:
+                content_parts.append(str(text))
+
+        if not tool_calls:
+            raise RuntimeError("Cohere native retry returned no tool calls.")
+
+        return ChatMessage(
+            role=MessageRole.ASSISTANT,
+            content="\n".join(content_parts),
+            tool_calls=tool_calls,
+            raw=response,
+        )
+
+    @classmethod
+    def _cohere_native_messages(cls, messages):
+        """Translate smolagents' internal tool messages into Cohere V2 chat messages."""
+        native = []
+
+        for message in messages or []:
+            role = (
+                message.get("role")
+                if isinstance(message, dict)
+                else getattr(message, "role", None)
+            )
+            content = (
+                message.get("content")
+                if isinstance(message, dict)
+                else getattr(message, "content", None)
+            )
+            role_text = getattr(role, "value", role)
+            role_text = str(role_text)
+
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        parts.append(str(item.get("text", "")))
+                text_content = "\n".join(p for p in parts if p)
+            else:
+                text_content = "" if content is None else str(content)
+
+            mapped_role = {
+                "tool-call": "assistant",
+                "tool-response": "user",
+            }.get(role_text, role_text)
+
+            if mapped_role not in {"system", "user", "assistant"}:
+                mapped_role = "user"
+
+            if not text_content.strip():
+                continue
+
+            if native and native[-1]["role"] == mapped_role:
+                native[-1]["content"] += "\n\n" + text_content
+            else:
+                native.append({"role": mapped_role, "content": text_content})
+
+        return native
 
     @staticmethod
     def _is_empty_generation_error(exc: Exception) -> bool:
