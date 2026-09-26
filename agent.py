@@ -34,7 +34,7 @@ SYSTEM_PROMPT = (ROOT / "prompts" / "gaia_system.txt").read_text(
     encoding="utf-8"
 )
 
-ANSWER_CACHE_VERSION = "1"
+ANSWER_CACHE_VERSION = "2"
 ANSWER_CACHE_ENABLED = os.getenv(
     "GAIA_CACHE_ENABLED", "true"
 ).strip().lower() not in {"0", "false", "no", "off"}
