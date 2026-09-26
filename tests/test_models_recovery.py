@@ -89,6 +89,7 @@ def test_native_retry_preserves_cohere_tool_protocol():
         "content": "Find something",
     }
     assert native[2]["role"] == "assistant"
+    assert "tool_calls" in native[2], native
     assert native[2]["tool_calls"][0]["id"] == "call_1"
     assert native[2]["tool_calls"][0]["function"]["name"] == "web_search"
     assert native[3]["role"] == "tool"
