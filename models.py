@@ -280,6 +280,13 @@ class FailoverModel(Model):
                 self._repair_text_tool_calls(result, tools_to_call_from)
                 self._repair_empty_web_search_call(result, messages)
                 self._repair_pdf_webpage_call(result, messages)
+                result = self._repair_plain_text_final_answer(
+                    result=result,
+                    messages=messages,
+                    final_answer_tool=self._find_final_answer_tool(
+                        tools_to_call_from
+                    ),
+                )
                 result = self._repair_malformed_final_answer(
                     delegate=delegate,
                     result=result,
@@ -335,15 +342,18 @@ class FailoverModel(Model):
         native_tools = [get_tool_json_schema(tool) for tool in tools_to_call_from]
 
         _wait_for_cohere_request()
-        response = client.chat(
-            model=route.model_id,
-            messages=native_messages,
-            tools=native_tools,
-            tool_choice="REQUIRED",
-            strict_tools=True,
-            temperature=0,
-            max_tokens=4096,
-        )
+        response_kwargs = {
+            "model": route.model_id,
+            "messages": native_messages,
+            "tools": native_tools,
+            "strict_tools": True,
+            "temperature": 0,
+            "max_tokens": 4096,
+        }
+        if "command-a-plus" in route.model_id.lower():
+            response_kwargs["tool_choice"] = "REQUIRED"
+
+        response = client.chat(**response_kwargs)
 
         tool_calls = []
         for call in (getattr(response.message, "tool_calls", None) or []):
@@ -865,6 +875,55 @@ class FailoverModel(Model):
                 return str(candidate).strip()
         return str(result.content or "").strip()
 
+    @classmethod
+    def _repair_plain_text_final_answer(cls, *, result, messages, final_answer_tool):
+        """Convert a completed plain text response into final_answer locally."""
+        if final_answer_tool is None or getattr(result, "tool_calls", None):
+            return result
+
+        content = getattr(result, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            return result
+
+        saw_tool_response = False
+        for message in messages or []:
+            role = (
+                message.get("role")
+                if isinstance(message, dict)
+                else getattr(message, "role", None)
+            )
+            value = getattr(role, "value", role)
+            value = str(value).strip().lower()
+            if value.startswith("messagerole."):
+                value = value.split(".", 1)[1]
+            value = value.replace("_", "-")
+            if "tool" in value and "response" in value:
+                saw_tool_response = True
+                break
+
+        if not saw_tool_response:
+            return result
+
+        answer = content.strip()
+        if answer.lower().startswith((
+            "calling tools:",
+            "error while generating output:",
+            "all cohere model routes failed",
+        )):
+            return result
+
+        result.tool_calls = [
+            ChatMessageToolCall(
+                function=ChatMessageToolCallFunction(
+                    name="final_answer",
+                    arguments=json.dumps({"answer": answer}, ensure_ascii=False),
+                ),
+                id="recovered_final_answer",
+                type="function",
+            )
+        ]
+        result.content = ""
+        return result
     def _repair_malformed_final_answer(
         self,
         *,
