@@ -93,6 +93,24 @@ def parse_request_id(text: str) -> str | None:
 
 def parse_remaining_minutes(text: str) -> float | None:
     value = text or ""
+
+    # Adversal may return structured JSON such as
+    # {"remaining_minutes": 96.0}. Parse that representation before falling
+    # back to the human-readable text formats.
+    try:
+        payload = json.loads(value)
+        if isinstance(payload, dict):
+            remaining = payload.get("remaining_minutes")
+            if isinstance(remaining, (int, float)):
+                return float(remaining)
+            if isinstance(remaining, str):
+                try:
+                    return float(remaining.strip())
+                except ValueError:
+                    pass
+    except (TypeError, ValueError):
+        pass
+
     patterns = (
         r"(?:remaining|left|available)\D{0,48}([\d.]+)\s*minutes?",
         r"([\d.]+)\s*minutes?\D{0,24}(?:remaining|left|available)",
