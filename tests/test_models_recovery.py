@@ -13,7 +13,7 @@ def test_parse_python_style_tool_calls():
     text = (
         "Calling tools:\n"
         "[{'id': 'call_1', 'type': 'function', 'function': "
-        "{'name': 'web_search', 'arguments': '{"query": "Mercedes Sosa"}'}}]"
+        "{'name': 'web_search', 'arguments': {'query': 'Mercedes Sosa'}}}]"
     )
 
     calls = FailoverModel._parse_serialized_tool_calls(text)
@@ -67,7 +67,7 @@ def test_native_retry_preserves_cohere_tool_protocol():
                         "Calling tools:\n"
                         "[{'id': 'call_1', 'type': 'function', 'function': "
                         "{'name': 'web_search', 'arguments': "
-                        "'{"query": "example"}'}}]"
+                        "{'query': 'example'}}]"
                     ),
                 }
             ],
