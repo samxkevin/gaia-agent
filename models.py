@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -161,7 +162,11 @@ class FailoverModel(Model):
         self.failover_count = 0
         self.total_attempts = 0
 
-    def _build_model(self, route: Route) -> OpenAIModel:
+    def _build_model(
+        self,
+        route: Route,
+        reasoning_effort: str | None = None,
+    ) -> OpenAIModel:
         return OpenAIModel(
             model_id=route.model_id,
             api_base=COHERE_BASE_URL,
@@ -172,7 +177,11 @@ class FailoverModel(Model):
             },
             retry=False,
             temperature=0,
-            reasoning_effort=self._reasoning_effort(route.model_id),
+            reasoning_effort=(
+                reasoning_effort
+                if reasoning_effort is not None
+                else self._reasoning_effort(route.model_id)
+            ),
             max_tokens=4096,
             tool_choice=REMOVE_PARAMETER,
         )
@@ -239,13 +248,32 @@ class FailoverModel(Model):
             try:
                 delegate = self._build_model(route)
                 _wait_for_cohere_request()
-                result = delegate.generate(
-                    messages,
-                    stop_sequences=[],
-                    response_format=response_format,
-                    tools_to_call_from=tools_to_call_from,
-                    **kwargs,
-                )
+                try:
+                    result = delegate.generate(
+                        messages,
+                        stop_sequences=[],
+                        response_format=response_format,
+                        tools_to_call_from=tools_to_call_from,
+                        **kwargs,
+                    )
+                except Exception as exc:
+                    if not self._is_empty_generation_error(exc):
+                        raise
+
+                    retry_messages = self._compact_messages_for_retry(messages)
+                    retry_delegate = self._build_model(
+                        route,
+                        reasoning_effort="none",
+                    )
+                    _wait_for_cohere_request()
+                    result = retry_delegate.generate(
+                        retry_messages,
+                        stop_sequences=[],
+                        response_format=response_format,
+                        tools_to_call_from=tools_to_call_from,
+                        **kwargs,
+                    )
+
                 self._repair_empty_web_search_call(result, messages)
                 self._repair_pdf_webpage_call(result, messages)
                 result = self._repair_malformed_final_answer(
@@ -272,6 +300,60 @@ class FailoverModel(Model):
         raise RuntimeError(
             "All Cohere model routes failed. " + " | ".join(errors)
         )
+
+    @staticmethod
+    def _is_empty_generation_error(exc: Exception) -> bool:
+        text = f"{type(exc).__name__}: {exc}".lower()
+        return (
+            "422" in text
+            and (
+                "no_tool_call_or_response_generated" in text
+                or "no_valid_response_generated" in text
+                or "no tool calls or response was generated" in text
+                or "no valid response generated" in text
+            )
+        )
+
+    @classmethod
+    def _compact_messages_for_retry(cls, messages):
+        """Reduce oversized tool observations before a provider retry."""
+        compacted = copy.deepcopy(messages)
+        max_chars = 7000
+
+        for message in compacted:
+            role = (
+                message.get("role")
+                if isinstance(message, dict)
+                else getattr(message, "role", None)
+            )
+            if str(role).lower() not in {"tool-response", "messagerole.tool_response"}:
+                continue
+
+            content = (
+                message.get("content")
+                if isinstance(message, dict)
+                else getattr(message, "content", None)
+            )
+            if not isinstance(content, list):
+                continue
+
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "text":
+                    continue
+
+                text = item.get("text", "")
+                if not isinstance(text, str) or len(text) <= max_chars:
+                    continue
+
+                head = text[:3500]
+                tail = text[-3500:]
+                item["text"] = (
+                    head
+                    + "\n\n[Long observation compacted for provider retry.]\n\n"
+                    + tail
+                )
+
+        return compacted
 
     @classmethod
     def _repair_pdf_webpage_call(cls, result, messages):
