@@ -18,9 +18,6 @@ COHERE_PRIMARY_MODEL = os.getenv(
     "command-a-plus-05-2026",
 ).strip() or "command-a-plus-05-2026"
 
-# Never allow an explicitly configured fallback to silently duplicate the
-# primary model. A duplicate route gives us no model diversity and was the
-# configuration that caused the previous 19/20 run to have two A+ routes.
 _requested_fallback_model = os.getenv("COHERE_FALLBACK_MODEL", "").strip()
 COHERE_FALLBACK_MODEL = (
     _requested_fallback_model
